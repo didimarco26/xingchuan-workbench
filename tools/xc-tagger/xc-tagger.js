@@ -600,7 +600,7 @@ function startServer() {
     } catch (_) {}
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.0.0', port: PORT,
+      ok: true, loggedIn, version: '3.1.0', port: PORT,
       loginUrl: SQUARE_URL,
       cookiesFile: '.xc-cookies.json',
       cookieCount,
@@ -727,7 +727,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.0.0');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.1.0（离线包，依赖与浏览器已内置）');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');

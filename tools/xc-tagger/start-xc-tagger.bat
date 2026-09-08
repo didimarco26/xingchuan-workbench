@@ -5,9 +5,9 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 echo ============================================
-echo   Xingchuan Tagger v3 - starting...
-echo   (runs locally; a Chrome window pops up
-echo    only when you click "Login to Xingtu")
+echo   Xingchuan Tagger v3.1 (offline build)
+echo   Dependencies and Chromium are bundled -
+echo   no network install needed.
 echo ============================================
 echo.
 
@@ -21,35 +21,26 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-rem 2) First run: install dependencies automatically
-if not exist node_modules (
-    echo First run: installing dependencies, please wait...
-    call npm install
-    if errorlevel 1 (
-        echo.
-        echo [ERROR] Dependency installation failed. Check your network and double-click again.
-        echo.
-        pause
-        exit /b 1
-    )
-)
+rem 2) Use the BUNDLED Playwright Chromium (never download at launch)
+set "PLAYWRIGHT_BROWSERS_PATH=%~dp0browsers-win"
+set PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
-rem 3) Ensure Playwright's OWN Chromium is installed (run every time - already installed = a few seconds)
-echo Checking Playwright Chromium browser...
-call npx playwright install chromium
-if errorlevel 1 (
-    echo.
-    echo [ERROR] Chromium download failed. Check your network and double-click again.
+if not exist "%~dp0browsers-win\chromium-1148\chrome-win\chrome.exe" (
+    echo [ERROR] Bundled Chromium is missing:
+    echo         browsers-win\chromium-1148\chrome-win\chrome.exe
+    echo         Please re-download the complete Windows package
+    echo         and extract ALL files before running.
     echo.
     pause
     exit /b 1
 )
-echo [OK] Chromium ready.
 
-rem 4) Start the tool (stays in background; click "Login to Xingtu" on the web page to scan QR)
+echo [OK] Bundled Chromium ready, no network install needed.
 echo.
+
+rem 3) Start the tool (stays in background; click "Login to Xingtu" on the web page to scan QR)
 echo ==================================================
-echo  Xingchuan Tagger is running v3 (local service).
+echo  Xingchuan Tagger is running v3.1 (local service).
 echo  Run from      : %~dp0
 echo  Local service : http://127.0.0.1:7842
 echo  Workbench page: https://didimarco26.github.io/xingchuan-workbench/
