@@ -1,52 +1,39 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.4
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.5
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，它会：
  *   1) 在 127.0.0.1:7842 起一个本地 HTTP 服务（只监听本机，不对外）；
  *   2) 浏览器方案（CDP 优先）：工具自动用【系统 Chrome/Edge】以远程调试端口
- *      启动一个独立实例（独立 user-data-dir=.xc-chrome-profile，与用户日常
- *      浏览器互不干扰），再 connectOverCDP 附加。浏览器真实可见，服务商在
- *      窗口里直接扫码/账号密码登录。
- *      启动/登录前会先【附加已在运行的调试 Chrome】（9222-9225 端口逐个
- *      探测）——上一次运行残留的调试窗口会被直接复用，里面的登录态自然有效。
+ *      启动独立实例并 connectOverCDP 附加，也会先附加已在运行的调试 Chrome
+ *      （9222-9225 端口探测）。浏览器真实可见，服务商在窗口里登录。
  *   3) 登录（仅需一次）：网页点「🚀 登录星图」→ POST /login，工具每 3 秒
- *      【主动轮询所有标签页的 URL】（遍历浏览器全部上下文，不依赖页面内容、
- *      不读 innerText）：只要任意标签页 URL 在 xingtu.cn 下且路径含 /ad/
- *      （创作者/广告主区域，未登录访问会被重定向到 sso.oceanengine.com），
- *      立即判定登录成功——
- *        ① Cookie 全量写入 .xc-cookies.json 备份；
- *        ② 【自动关闭浏览器窗口】（CDP 模式；登录态保存在 .xc-chrome-profile
- *           配置目录，打标时工具在后台自动重开浏览器、免登录）；
- *        ③ 内存登录位置位，/health 立即返回 loggedIn=true，前端自动刷新。
- *      检测超时 5 分钟 / 点「取消」中止。
- *      ★ v3.4 修复（服务商反馈「窗口里账号密码登录成功，但窗口不关闭、
- *        网页仍提示未登录」）：
- *        · 登录判定从「URL + 页面正文启发式」改为【纯 URL 判定】——旧版
- *          page.evaluate 读 innerText 在页面跳转瞬间会抛异常、在角色选择/
- *          营销首页等子页面会误判，是漏检的根因；
- *        · 轮询范围从单一上下文扩大到浏览器【全部上下文的全部标签页】；
- *        · 登录成功后按预期【自动关闭窗口】（v3.3 误保留为不关闭）；
- *        · /health 不再为探测登录态而启动/导航浏览器，直接读内存登录位 +
- *          对存活会话做零副作用 URL 扫描，前端轮询即时反映状态。
- *   4) 打标：POST /tag 时若浏览器已关闭则自动后台重开（同一配置目录，
- *      登录态仍在），在后台标签页抓取；关闭浏览器窗口即停止。
- *   5) 网页（星川决策工作台·服务商 GitHub 版）调用本地接口：
- *        GET  /health   → 探测服务、CDP 连接与登录状态（含 loginPending）
- *        GET  /login/qr → 无头模式的登录二维码（CDP 模式无图）
- *        POST /login    → 在 Chrome 中打开星图页并等待登录
- *        POST /parse    → 解析上传的 Excel/CSV 达人名单
- *        POST /tag      → 用星图登录态抓取达人信息并按存量逻辑分层打标
- *   兜底：系统浏览器全部不可用 / 调试端口被企业策略禁用时，自动降级无头扫码
- *      模式（Playwright headless + 网页展示抖音二维码，手机扫码登录；无头
- *      模式无窗口可关，浏览器保留供打标）。
+ *      主动轮询所有标签页 URL（纯 URL 判定：xingtu.cn 下路径含 /ad 段即成功），
+ *      扫码/账号密码/验证码均可；成功后写 Cookie 备份、CDP 模式自动关闭窗口，
+ *      /health 内存登录位即时生效。超时 5 分钟。
+ *   4) 打标：POST /tag 时后台自动重开浏览器（同一配置目录免登录）：
+ *      · 星图 API 批量取结构化数据（星川等级 S0-S5 / 交付项目数 / 星图消耗 /
+ *        电商等级 / 粉丝量 / 人设·内容形式·行业受控词标签）；
+ *      · ★ v3.5 新增：逐个进入达人主页（/ad/creator/detail/{id}），拦截
+ *        视频列表 XHR（失败降级 DOM 解析「创作能力」区），抓【前三个视频】
+ *        的标题/播放/点赞/内容形式，输出 videoAnalysis；视频标题反哺
+ *        forms/persona/industry 标签（只补充不覆盖）；XC_TAGGER_DEBUG=1 时
+ *        落截图+接口 JSON 到 .xc-debug/ 供真机校准；每达人间隔 800ms 防风控。
+ *   5) 评分双库口径：
+ *      · 存量库（名单「来源」列=存量/库存/已合作，stock）：80 分制四项
+ *        （星川等级30/交付20/星图消耗20/电商10），与 tblUXi2raUVtv3et 对齐；
+ *      · 增量库（increment）/未在库新达人（new，缺省）：基础 80 分 +
+ *        视频分析加分（带货视频+5/个最多15、口播测评种草+5、播放超10万+5，
+ *        合计最多+20，总分封顶100）；输出 dataSource/videoBonus/videoAnalysis。
+ *   网页接口：GET /health · GET /login/qr · POST /login · POST /parse · POST /tag。
+ *   兜底：系统浏览器不可用/调试端口被禁 → 无头扫码模式（网页显示抖音二维码）。
  *   Cookie 只留在服务商本机，不上传、不落库。
  *
  * 运行：解压后双击 start-xc-tagger.command(Mac) / start-xc-tagger.bat(Windows)
- *      （依赖 node_modules 已内置，解压即用；需 Node.js 18+ 与 Chrome 或 Edge）。
+ *      （node_modules 已内置，解压即用；需 Node.js 18+ 与 Chrome 或 Edge）。
  *
- * 安全：CORS 仅放行 didimarco26.github.io 与本机页面；服务只绑定 127.0.0.1。
+ * 安全：CORS 仅放行 *.github.io 与本机页面；服务只绑定 127.0.0.1。
  */
 
 'use strict';
@@ -1024,12 +1011,23 @@ async function getByIds(page, ids) {
 }
 
 // 对单个达人打标（输出字段与存量达人库口径对齐）
-function scoreAuthor(auth) {
+function scoreAuthor(auth, opts = {}) {
+  const dataSource = opts.dataSource === 'stock' || opts.dataSource === 'increment' ? opts.dataSource : 'new';
+  const videos = Array.isArray(opts.videoAnalysis) ? opts.videoAnalysis : [];
   const sScore = S_LEVEL_SCORE[auth.sLevel] != null ? S_LEVEL_SCORE[auth.sLevel] : 0;
   const dScore = scoreDeliveries(auth.deliveries);
   const cScore = scoreConsumption(auth.consumption);
   const lScore = scoreEcomLevel(auth.lLevel);
-  const score = Math.round((sScore + dScore + cScore + lScore) * 10) / 10;
+  const baseScore = Math.round((sScore + dScore + cScore + lScore) * 10) / 10;
+  // v3.5 双库口径：存量库保持 80 分制；增量库/新达人叠加视频内容分析加分（最多 +20，总分封顶 100）
+  let videoBonus = 0;
+  let bonusWhy = [];
+  if (dataSource !== 'stock' && videos.length) {
+    const vb = scoreVideoBonus(videos);
+    videoBonus = vb.bonus;
+    bonusWhy = vb.why;
+  }
+  const score = Math.min(100, Math.round((baseScore + videoBonus) * 10) / 10);
   const { tier, medal } = tierOf(score);
   // 标签：星川等级 + 粉丝量级 + 消耗档 + 电商等级 + 交付经验 + 人设/内容形式（存量库标签风格）
   const tags = [];
@@ -1041,17 +1039,242 @@ function scoreAuthor(auth) {
   if (auth.deliveries > 50) tags.push('交付经验丰富');
   (auth.persona || []).slice(0, 2).forEach(t => { if (t && t.length <= 12 && !tags.includes(t)) tags.push(t); });
   (auth.forms || []).slice(0, 1).forEach(t => { if (t && t.length <= 8 && !tags.includes(t)) tags.push(t); });
+  videos.slice(0, 2).forEach(v => { if (v && v.contentType && !tags.includes(v.contentType)) tags.push(v.contentType); });
+  if (videoBonus > 0) tags.push(`视频+${videoBonus}`);
   if (!tags.length) tags.push('待培育');
-  const reason =
+  const dsText = dataSource === 'stock' ? '存量库' : dataSource === 'increment' ? '增量库' : '未在库(新达人)';
+  let reason =
     `星川${auth.sLevel || '未分级'}(${sScore}分) · 星图消耗${fmtWan(auth.consumption)}(${cScore}分) · ` +
     `交付${auth.deliveries}个项目(${dScore}分) · 电商${auth.lLevel || '—'}(${lScore}分)` +
     (auth.fansTier ? ` · ${auth.fansTier}` : '') +
     (auth.industry && auth.industry.length ? ` · 行业${auth.industry.join('/')}` : '') +
-    (auth.category ? ` · 类目${auth.category}` : '');
-  return { score, tier, medal, tags, reason };
+    (auth.category ? ` · 类目${auth.category}` : '') +
+    ` · 基础分${baseScore}`;
+  if (videos.length) {
+    reason += `\n视频分析: ` + videos.slice(0, 3).map(v => `[${(v.title || '').slice(0, 15)}]`).join('');
+    if (videoBonus > 0) reason += `\n视频加分: +${videoBonus}（${bonusWhy.join('；')}）`;
+  }
+  reason += `\n数据来源: ${dsText}`;
+  return { score, tier, medal, tags, reason, videoBonus, dataSource, baseScore };
 }
 
-// ---- 名单解析（Excel / CSV）-----------------------------------------------
+// ---- v3.5：达人主页视频分析（进达人详情页抓前三个视频，辅助内容方向判断与加分）-------
+const CREATOR_DETAIL_URL = (id) => `https://www.xingtu.cn/ad/creator/detail/${id}`;
+
+// "12.5万"/"1.2亿"/"3w"/纯数字 → 数字
+function parseMediaCount(t) {
+  if (typeof t === 'number') return isFinite(t) ? t : 0;
+  const s = String(t == null ? '' : t).replace(/[,，\s]/g, '');
+  const m = s.match(/(\d+(?:\.\d+)?)\s*(亿|万|[wW])?/);
+  if (!m) return 0;
+  let n = parseFloat(m[1]);
+  if (m[2] === '亿') n *= 1e8;
+  else if (m[2] === '万' || m[2] === 'w' || m[2] === 'W') n *= 1e4;
+  return Math.round(n);
+}
+
+// 视频内容形式推断（仅用视频标题，匹配不到留空、不臆造）
+function inferVideoContentType(title) {
+  const t = title || '';
+  if (/测评|评测|开箱|实测|横评|对比|值不值|避坑|红黑榜|真的好用/.test(t)) return '测评';
+  if (/种草|好物|推荐|清单|必买|爱用|安利|闭眼入|盘点|合集/.test(t)) return '种草';
+  if (/口播|知识|科普|教程|攻略|干货|解说|怎么选|方法|小课堂/.test(t)) return '口播';
+  if (/剧情|段子|搞笑|反转|情景剧/.test(t)) return '剧情';
+  if (/vlog|Vlog|VLOG|日常|记录生活/.test(t)) return 'vlog';
+  return '';
+}
+
+// 带货/产品植入信号词（标题启发式；API 返回商品字段时直接判 true）
+const VIDEO_SELL_KW = /同款|链接|下单|到手|橱窗|好物|种草|推荐|购买|小黄车|价格|多少钱|划算|旗舰店|正品|囤货|福利|专场|直播|带货|优惠|券|平替|新品|品牌/;
+function videoIsSelling(v) {
+  return !!(v && (v.hasProduct || (v.title && VIDEO_SELL_KW.test(v.title))));
+}
+
+// 深度遍历星图接口 JSON，收集“像视频/作品”的对象（宽松匹配，字段名待真机校准）
+function deepCollectVideos(node, out, depth) {
+  if (!node || depth > 10 || out.length >= 15) return;
+  if (Array.isArray(node)) { for (const n of node) deepCollectVideos(n, out, depth + 1); return; }
+  if (typeof node === 'object') {
+    const stat = node.statistics || node.stats || node.stat || (node.video && node.video.statistics) || {};
+    const vid = node.aweme_id ?? node.item_id ?? node.video_id ?? node.awemeId ?? node.itemId ?? stat.aweme_id;
+    const title = normText(node.desc ?? node.title ?? node.item_title ?? node.video_title ?? node.name);
+    const hasPlayLike = node.play_count != null || node.playCount != null || node.play_cnt != null ||
+      node.digg_count != null || node.diggCount != null || stat.play_count != null || stat.digg_count != null ||
+      (node.video && typeof node.video === 'object');
+    const looksVideo = (vid && /^\d{6,}$/.test(String(vid)) && title) || (title && hasPlayLike);
+    const isUser = node.follower_count != null || node.fans_count != null || node.followerCount != null; // 排除达人对象
+    if (looksVideo && !isUser) {
+      const plays = parseMediaCount(node.play_count ?? node.playCount ?? node.play_cnt ?? stat.play_count ?? stat.playCount ?? 0);
+      const likes = parseMediaCount(node.digg_count ?? node.diggCount ?? stat.digg_count ?? stat.diggCount ?? node.like_count ?? 0);
+      const hasProduct = !!(node.product_info || node.products || node.goods || node.goods_list ||
+        node.with_goods || node.shop_goods || node.ecommerce_info || node.product_related ||
+        node.anchor_info || node.promotions || node.channels ||
+        (node.video && (node.video.product || node.video.goods || node.video.product_info)));
+      out.push({ id: String(vid || ''), title: title.slice(0, 80), plays, likes, hasProduct });
+    }
+    for (const k of Object.keys(node)) {
+      const v = node[k];
+      if (v && typeof v === 'object') deepCollectVideos(v, out, depth + 1);
+    }
+  }
+}
+
+// 浏览器侧 DOM 降级：抓视频/作品卡片文本（纯浏览器 JS，不引用 Node 侧变量）
+function domVideoCardsEval() {
+  const out = [];
+  const seenText = new Set();
+  const push = (el) => {
+    const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
+    if (text.length < 8 || text.length > 400) return;
+    const key = text.slice(0, 24);
+    if (seenText.has(key)) return;
+    seenText.add(key);
+    const a = el.matches && el.matches('a') ? el : el.querySelector('a[href*="video"], a[href*="aweme"]');
+    out.push({ text, href: a ? a.href : '' });
+  };
+  const sels = [
+    'a[href*="/video/"]', 'a[href*="aweme"]',
+    '[class*="video" i]', '[class*="work" i]', '[class*="aweme" i]',
+    '[class*="content-card" i]', '[class*="creator-card" i]',
+  ];
+  for (const s of sels) { try { document.querySelectorAll(s).forEach(push); } catch (_) {} }
+  return out.slice(0, 12);
+}
+
+/**
+ * v3.5：访问达人详情页，抓前三个视频信息。
+ * 优先拦截 XHR/fetch 响应（含视频列表/作品/详情的接口）→ 宽松挖 JSON；
+ * 拦截不到则降级解析「创作能力」区域 DOM 卡片。
+ * 任何失败（404/权限/结构变化）都返回 []，不阻塞打标。
+ * debug=true（XC_TAGGER_DEBUG=1）时落截图 + 原始接口 JSON 到 .xc-debug/ 供真机校准。
+ */
+async function fetchCreatorVideos(page, authorId, { debug = false } = {}) {
+  if (!authorId) return [];
+  const ctx = page.context ? page.context() : page;
+  let vp = null;
+  const apiHits = [];
+  const dbgDir = path.join(process.cwd(), '.xc-debug');
+  try {
+    vp = await ctx.newPage();
+    try { await vp.setViewportSize({ width: 1360, height: 900 }); } catch (_) {}
+    vp.on('response', async (resp) => {
+      try {
+        const u = resp.url();
+        if (!/xingtu\.cn|oceanengine\.com/i.test(u)) return;
+        const rt = resp.request().resourceType();
+        if (rt !== 'xhr' && rt !== 'fetch') return;
+        if (!/video|aweme|work|post|creator|author|content|detail|feed/i.test(u)) return;
+        const j = await resp.json();
+        apiHits.push({ url: u, json: j });
+      } catch (_) { /* 非 JSON */ }
+    });
+    await vp.goto(CREATOR_DETAIL_URL(authorId), { waitUntil: 'domcontentloaded', timeout: 30000 });
+    // 等视频列表接口（9s 内命中即继续，否则走 DOM 降级）
+    await vp.waitForResponse((r) => {
+      try {
+        const rt = r.request().resourceType();
+        if (rt !== 'xhr' && rt !== 'fetch') return false;
+        return /video|aweme|work|post|feed|creator.*(detail|home|info)|author.*(video|work|post)/i.test(r.url());
+      } catch (_) { return false; }
+    }, { timeout: 9000 }).catch(() => {});
+    await vp.waitForTimeout(2000);
+    // 尝试切换到「创作能力/作品/视频」tab（视频列表常在该 tab 下）
+    await vp.evaluate(() => {
+      const kw = /创作能力|作品|视频|内容|TA的视频/;
+      const els = Array.from(document.querySelectorAll('div,span,a,button,li,[role="tab"]'));
+      const hit = els.find((e) => {
+        const t = (e.innerText || '').trim();
+        return t && t.length <= 10 && kw.test(t) && e.offsetParent !== null;
+      });
+      if (hit) { try { hit.click(); } catch (_) {} }
+    }).catch(() => {});
+    await vp.waitForTimeout(2500);
+
+    // 1) 接口 JSON 挖视频
+    let vids = [];
+    for (const h of apiHits) deepCollectVideos(h.json, vids, 0);
+    const seen = new Set();
+    vids = vids.filter((v) => {
+      const key = v.id || v.title.slice(0, 20);
+      if (!key || seen.has(key)) return false;
+      seen.add(key); return true;
+    });
+
+    // 2) DOM 降级
+    if (vids.length === 0) {
+      const cards = await vp.evaluate(domVideoCardsEval).catch(() => []);
+      vids = cards.map((c) => {
+        const title = c.text
+          .replace(/\d+(?:\.\d+)?\s*(亿|万|[wW])?\s*(次播放|播放|次观看|观看|赞|评论|分享|收藏|点赞)?/g, ' ')
+          .replace(/\s+/g, ' ').trim().slice(0, 60);
+        const pm = c.text.match(/(\d+(?:\.\d+)?)\s*(亿|万|[wW])?\s*(次播放|播放|次观看)/);
+        return {
+          id: '', title: title || '',
+          plays: pm ? parseMediaCount(pm[0]) : 0, likes: 0,
+          hasProduct: /同款|链接|下单|到手|橱窗|好物|种草|购买|小黄车|价格|划算|直播|带货|优惠/.test(c.text),
+          fromDom: true,
+        };
+      }).filter((v) => v.title && v.title.length >= 4).slice(0, 3);
+    }
+
+    vids = vids.slice(0, 3).map((v) => ({
+      title: v.title,
+      plays: v.plays || 0,
+      likes: v.likes || 0,
+      contentType: inferVideoContentType(v.title),
+      isSelling: videoIsSelling(v),
+    }));
+
+    if (debug) {
+      try {
+        fs.mkdirSync(dbgDir, { recursive: true });
+        const ts = Date.now();
+        await vp.screenshot({ path: path.join(dbgDir, `creator_${authorId}_${ts}.png`), fullPage: false }).catch(() => {});
+        fs.writeFileSync(path.join(dbgDir, `creator_${authorId}_${ts}.json`),
+          JSON.stringify(apiHits.map((h) => ({ url: h.url, json: h.json }))).slice(0, 3000000), 'utf8');
+      } catch (_) {}
+    }
+    return vids;
+  } catch (e) {
+    if (debug) console.log('  ⚠️ 视频抓取失败(' + authorId + ')：' + friendlyErr(e));
+    return [];
+  } finally {
+    if (vp) await vp.close().catch(() => {});
+  }
+}
+
+// 用视频标题推断的标签【补充】（不覆盖）达人 forms/persona/industry 受控词
+function enrichAuthFromVideos(auth, videos) {
+  if (!auth || !Array.isArray(videos) || !videos.length) return;
+  const text = videos.map((v) => v.title || '').filter(Boolean).join(' ');
+  if (!text) return;
+  const merge = (oldList, add) => Array.from(new Set([...(oldList || []), ...add]));
+  auth.forms = merge(auth.forms, matchControlled(text, STOCK_FORM_RULES, 2));
+  auth.persona = merge(auth.persona, matchControlled(text, STOCK_PERSONA_RULES, 2));
+  auth.industry = merge(auth.industry, matchControlled(text, STOCK_INDUSTRY_RULES, 2));
+}
+
+/**
+ * v3.5 增量库/新达人口径：前三个视频内容分析加分（最多 +20，总分封顶 100）。
+ *  · 带货/产品植入视频：+5/个，最多 +15
+ *  · 内容形式为口播/测评/种草：+5
+ *  · 任一视频播放量 >10 万：+5
+ * 存量库口径（dataSource='stock'）不加分，保持 80 分制。
+ */
+function scoreVideoBonus(videos) {
+  const list = Array.isArray(videos) ? videos : [];
+  let bonus = 0;
+  const why = [];
+  const sellingCnt = list.filter((v) => v && v.isSelling).length;
+  const sellBonus = Math.min(sellingCnt * 5, 15);
+  if (sellBonus > 0) { bonus += sellBonus; why.push(`${sellingCnt}条带货/产品植入视频+${sellBonus}`); }
+  if (list.some((v) => v && /测评|口播|种草/.test(v.contentType || ''))) { bonus += 5; why.push('口播/测评/种草内容形式+5'); }
+  if (list.some((v) => v && (Number(v.plays) || 0) >= 100000)) { bonus += 5; why.push('视频播放量超10万+5'); }
+  bonus = Math.min(bonus, 20);
+  return { bonus, why };
+}
+
+
 function parseListBuffer(buf, filename) {
   const wb = XLSX.read(buf, { type: 'buffer' });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -1062,6 +1285,14 @@ function parseListBuffer(buf, filename) {
   // 昵称列：跳过 ID 列（「星图达人ID」也含「达人」二字，不能误选）
   const nameKey = headers.find(h => h !== idKey && /昵称|名字|达人名|账号名|name|主播|达人/i.test(h)) ||
     headers.find(h => h !== idKey);
+  // v3.5：数据来源列（存量/增量），用于双库口径打分；可缺省（默认按新达人）
+  const srcKey = headers.find(h => h !== idKey && /来源|数据源|库别|所属库|名单类型/i.test(h));
+  const normSrc = (v) => {
+    const s = normText(v).toLowerCase();
+    if (/存量|库存|已合作|stock/.test(s)) return 'stock';
+    if (/增量|incr|increment/.test(s)) return 'increment';
+    return '';
+  };
   const items = [];
   rows.forEach((r, i) => {
     let id = idKey ? normText(r[idKey]) : '';
@@ -1073,7 +1304,8 @@ function parseListBuffer(buf, filename) {
     }
     const idDigits = (id.match(/\d{12,}/) || [])[0] || '';
     if (idDigits) id = idDigits;
-    if (id || name) items.push({ id, name, row: i + 2 });
+    const src = srcKey ? normSrc(r[srcKey]) : '';
+    if (id || name) items.push({ id, name, row: i + 2, src });
   });
   return { items, headers };
 }
@@ -1124,7 +1356,7 @@ function startServer() {
     if (loggedIn) _loggedIn = true;
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.4.0', port: PORT,
+      ok: true, loggedIn, version: '3.5.0', port: PORT,
       loginUrl: SQUARE_URL,
       cookiesFile: '.xc-cookies.json',
       cookieCount,
@@ -1219,6 +1451,8 @@ function startServer() {
       _loggedIn = true;
 
       const results = [];
+      const debugVideo = process.env.XC_TAGGER_DEBUG === '1';
+      if (debugVideo) console.log('🐞 XC_TAGGER_DEBUG=1：视频抓取将落截图与接口 JSON 到 .xc-debug/');
       // 1) 先按 ID 批量取（50/批）
       const withId = items.filter(x => x.id);
       const byName = items.filter(x => !x.id && x.name);
@@ -1238,10 +1472,26 @@ function startServer() {
           if (kw) { try { auth = await searchByName(page, String(kw)); } catch (_) { auth = null; } await sleep(350); }
         }
         if (!auth) {
-          results.push({ id: it.id || '', name: it.name || '(未命名)', found: false, score: 0, tier: '储备', medal: '⚪', sLevel: '', lLevel: '', deliveries: 0, consumption: 0, tags: ['未检索到'], reason: '未在星图达人广场检索到，请核对昵称/ID 或该达人是否入驻星图' });
+          results.push({
+            id: it.id || '', name: it.name || '(未命名)', found: false, score: 0, tier: '储备', medal: '⚪',
+            sLevel: '', lLevel: '', deliveries: 0, consumption: 0, tags: ['未检索到'],
+            reason: '未在星图达人广场检索到，请核对昵称/ID 或该达人是否入驻星图',
+            dataSource: 'new', videoBonus: 0, videoAnalysis: [],
+          });
           continue;
         }
-        const sc = scoreAuthor(auth);
+        // v3.5：双库口径（名单「来源」列：存量=stock/增量=increment；缺省按新达人 new）
+        const dataSource = it.src === 'stock' || it.src === 'increment' ? it.src : 'new';
+        // v3.5：进达人主页抓前三个视频（XHR 拦截优先、DOM 降级；失败返回 [] 不阻塞）
+        let videoAnalysis = [];
+        if (auth.id) {
+          try {
+            videoAnalysis = await fetchCreatorVideos(page, String(auth.id), { debug: debugVideo });
+          } catch (_) { videoAnalysis = []; }
+          await sleep(800); // 防风控：达人主页访问间隔
+        }
+        enrichAuthFromVideos(auth, videoAnalysis);
+        const sc = scoreAuthor(auth, { dataSource, videoAnalysis });
         results.push({
           id: auth.id || it.id || '', name: auth.name || it.name || '', found: true,
           score: sc.score, tier: sc.tier, medal: sc.medal,
@@ -1251,6 +1501,7 @@ function startServer() {
           persona: auth.persona || [], forms: auth.forms || [], industry: auth.industry || [],
           category: auth.category || '',
           tags: sc.tags, reason: sc.reason,
+          dataSource: sc.dataSource, videoBonus: sc.videoBonus, videoAnalysis,
         });
       }
       // 按分降序
@@ -1265,7 +1516,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.4.0');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.5.0');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
@@ -1318,6 +1569,15 @@ module.exports = {
   LOGIN_URL,
   LOGIN_WAIT_MS,
   LOGIN_POLL_MS,
+  // v3.5
+  scoreAuthor,
+  scoreVideoBonus,
+  inferVideoContentType,
+  videoIsSelling,
+  parseMediaCount,
+  deepCollectVideos,
+  enrichAuthFromVideos,
+  CREATOR_DETAIL_URL,
 };
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

@@ -5,7 +5,7 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 echo ============================================
-echo   Xingchuan Tagger v3.4
+echo   Xingchuan Tagger v3.5
 echo   Node dependencies are bundled - no
 echo   network install needed. Uses your system
 echo   Chrome / Edge for login (falls back to an
@@ -30,7 +30,7 @@ echo.
 
 rem 2) Start the tool (stays in background; click "Login to Xingtu" on the web page)
 echo ==================================================
-echo  Xingchuan Tagger is running v3.4 (local service).
+echo  Xingchuan Tagger is running v3.5 (local service).
 echo  Run from      : %~dp0
 echo  Local service : http://127.0.0.1:7842
 echo  Workbench page: https://didimarco26.github.io/xingchuan-workbench/
