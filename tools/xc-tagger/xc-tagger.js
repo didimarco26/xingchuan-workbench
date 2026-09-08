@@ -1,35 +1,41 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.2
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.3
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，它会：
  *   1) 在 127.0.0.1:7842 起一个本地 HTTP 服务（只监听本机，不对外）；
- *   2) 浏览器方案：启动脚本（start-xc-tagger / xc-open-chrome）先用
- *      【系统 Chrome/Edge】以远程调试端口启动一个独立浏览器实例：
- *        --remote-debugging-port=9222 --user-data-dir=<工具目录>/.xc-chrome-profile
- *      工具本身【绝不 launch 浏览器】，只用 connectOverCDP 附加到这个实例
- *      （Windows 安全策略会立即关闭 Playwright 自己弹出的 Chromium 窗口，
- *        exitCode=0；系统 Chrome 由启动脚本正常拉起，不受此限制）。
- *   3) 登录（仅需一次）：网页点「🚀 登录星图」→ POST /login，工具在已连接的
- *      Chrome 里打开巨量星图达人广场标签页，服务商在该窗口扫码/验证码登录；
- *      工具每 2 秒检测一次，成功后 Cookie 写入 .xc-cookies.json 备份
- *      （登录态主体保存在 .xc-chrome-profile 浏览器配置目录，长期免登录）。
- *      浏览器窗口不自动关闭，由用户自行关闭；超时 180 秒 / 点「取消」中止。
+ *   2) 浏览器方案（CDP 优先）：工具自动用【系统 Chrome/Edge】以远程调试端口
+ *      启动一个独立实例（独立 user-data-dir=.xc-chrome-profile，与用户日常
+ *      浏览器互不干扰），再 connectOverCDP 附加。浏览器真实可见，服务商在
+ *      窗口里直接扫码/验证码登录。
+ *      ★ v3.3 修复：启动/登录前会先【附加已在运行的调试 Chrome】
+ *        （9222-9225 端口逐个探测）——上一次运行残留的调试窗口（detached
+ *        启动，工具退出后浏览器仍在）会被直接复用，里面的登录态自然有效；
+ *        不再因 profile 目录锁导致 spawn 静默失败、误降级无头。
+ *      —— Windows 安全策略会立即关闭 Playwright 自己 launch 的 Chromium
+ *         窗口（exitCode=0），但系统 Chrome 由本工具以普通进程方式拉起，不受影响。
+ *   3) 登录（仅需一次）：网页点「🚀 登录星图」→ POST /login，工具复用浏览器里
+ *      已有的星图/SSO 标签页（不重复开页），服务商在该窗口扫码/验证码登录；
+ *      工具每 2.2 秒遍历【所有标签页】检测登录态（任一标签进入星图 /ad/
+ *      创作者区域即判成功；落在营销首页等非 /ad/ 页时自动导航到达人广场复核），
+ *      成功后 Cookie 写入 .xc-cookies.json 备份（登录态主体保存在
+ *      .xc-chrome-profile 浏览器配置目录，长期免登录）。
+ *      超时 180 秒 / 点「取消」中止。
  *   4) 打标：POST /tag 复用同一条 CDP 连接，在同一个 Chrome 里开后台标签页
  *      抓取（标签页可见，可看到工具在工作；关闭浏览器窗口即停止）。
  *   5) 网页（星川决策工作台·服务商 GitHub 版）调用本地接口：
  *        GET  /health   → 探测服务、CDP 连接与登录状态（含 loginPending）
+ *        GET  /login/qr → 无头模式的登录二维码（CDP 模式无图）
  *        POST /login    → 在 Chrome 中打开星图页并等待扫码登录
  *        POST /parse    → 解析上传的 Excel/CSV 达人名单
  *        POST /tag      → 用星图登录态抓取达人信息并按存量逻辑分层打标
- *   若 9222 端口连不上（Chrome 未用调试端口启动），/login 返回
- *      needOpenChrome:true，提示用户双击包里的 xc-open-chrome 脚本补开。
+ *   兜底：系统浏览器全部不可用 / 调试端口被企业策略禁用时，自动降级无头扫码
+ *      模式（Playwright headless + 网页展示抖音二维码，手机扫码登录）。
  *   Cookie 只留在服务商本机，不上传、不落库。
  *
  * 运行：解压后双击 start-xc-tagger.command(Mac) / start-xc-tagger.bat(Windows)
- *      （脚本会自动打开调试 Chrome 并启动本服务；需已安装 Node.js 18+ 与
- *        Google Chrome 或 Edge）。
+ *      （依赖 node_modules 已内置，解压即用；需 Node.js 18+ 与 Chrome 或 Edge）。
  *
  * 安全：CORS 仅放行 didimarco26.github.io 与本机页面；服务只绑定 127.0.0.1。
  */
@@ -239,6 +245,47 @@ async function cdpProbe(port, timeoutMs = 20000) {
   return null;
 }
 
+// 单次探测某端口是否已有 CDP 调试服务（不轮询，快速失败），返回 /json/version 信息或 null
+async function cdpProbeOnce(port, timeoutMs = 1200) {
+  try {
+    const r = await fetch(`http://${HOST}:${port}/json/version`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (r.ok) return await r.json();
+  } catch (_) { /* 端口无服务 */ }
+  return null;
+}
+
+/**
+ * ★ v3.3：附加到【已经在运行】的调试 Chrome/Edge（端口 9222-9225 逐个探测）。
+ * 典型场景：上一次工具运行以 detached 方式拉起的 Chrome 在工具退出后仍活着，
+ * 且持有 .xc-chrome-profile 配置锁与登录态；新 spawn 的实例会把命令行转发给它后
+ * 立即退出，导致旧版误判「启动失败」并静默降级无头。直接复用该实例即可拿到
+ * 用户刚登录的登录态。connectImpl/ probeImpl 可注入便于单测。
+ */
+async function connectExistingCdp(playwright, ports, probeImpl) {
+  const list = ports || CDP_CANDIDATE_PORTS;
+  const probe = probeImpl || cdpProbeOnce;
+  for (const port of list) {
+    let info = null;
+    try { info = await probe(port); } catch (_) { info = null; }
+    if (!info) continue;
+    try {
+      const browser = await playwright.chromium.connectOverCDP(`http://${HOST}:${port}`, { timeout: 6000 });
+      const ctxs = browser.contexts ? browser.contexts() : [];
+      const context = ctxs[0] || await browser.newContext();
+      const brand = (info && info.Browser) ? String(info.Browser).split('/')[0] : 'Chrome/Edge';
+      console.log(`   ✅ 已附加到正在运行的调试浏览器（CDP 端口 ${port}，${brand}），直接复用其登录态。`);
+      return {
+        mode: 'cdp', browser, context, cdpPort: port, proc: null, reused: true, _workPage: null,
+        browserId: 'existing',
+        browserName: `已运行的系统 ${/Edg/i.test(brand) ? 'Edge' : 'Chrome'}（复用窗口）`,
+      };
+    } catch (e) {
+      console.log(`   ⚠️ 端口 ${port} 有调试服务但附加失败：${friendlyErr(e)}`);
+    }
+  }
+  return null;
+}
+
 /**
  * 用指定浏览器启动一个带远程调试端口的独立实例。
  * spawn 以参数数组传参（不经 shell），路径含中文/空格也安全。
@@ -279,35 +326,54 @@ async function launchSystemBrowser(cand, port, profileDir) {
   });
 }
 
-// ① CDP 模式：逐个候选浏览器尝试 启动→连接，全部失败返回 null
+// ① CDP 模式：先附加已运行的调试浏览器；没有再逐个候选浏览器【启动→连接】，全部失败返回 null
 async function tryCdpSession() {
+  const playwright = require('playwright');
+
+  // 0) 优先复用已在运行的调试 Chrome/Edge（含上一次运行残留、已登录的窗口）
+  try {
+    const existing = await connectExistingCdp(playwright);
+    if (existing) return existing;
+  } catch (e) {
+    console.log('   ⚠️ 探测已有调试浏览器异常：' + friendlyErr(e));
+  }
+
   const cands = browserCandidates();
   if (!cands.length) {
     console.log('ℹ️  未探测到系统 Chrome/Edge，将使用无头扫码模式。');
     return null;
   }
-  const port = await pickFreePort(CDP_CANDIDATE_PORTS);
-  if (!port) {
-    console.log('ℹ️  调试端口 9222-9225 均被占用，将使用无头扫码模式。');
-    return null;
-  }
-  const playwright = require('playwright');
   for (const cand of cands) {
-    console.log(`🌐 尝试启动 ${cand.name}（调试端口 ${port}）…`);
-    let launched = null;
-    try { launched = await launchSystemBrowser(cand, port, CHROME_PROFILE_DIR); } catch (_) { launched = null; }
-    if (!launched) { console.log(`   ✗ ${cand.name} 启动失败或调试端口无响应，尝试下一个浏览器。`); continue; }
-    try {
-      const browser = await playwright.chromium.connectOverCDP(`http://${HOST}:${port}`, { timeout: 8000 });
-      const ctxs = browser.contexts ? browser.contexts() : [];
-      const context = ctxs[0] || await browser.newContext();
-      console.log(`   ✅ 已连接 ${cand.name}（CDP 端口 ${port}）。`);
-      return { mode: 'cdp', browser, context, browserName: cand.name, browserId: cand.id, cdpPort: port, proc: launched.proc, _workPage: null };
-    } catch (e) {
-      console.log(`   ✗ 连接 ${cand.name} 失败：${friendlyErr(e)}，尝试下一个浏览器。`);
-      try { launched.proc.kill(); } catch (_) {}
+    // 每个候选浏览器都重新挑端口：上一轮失败可能留下了半启动实例占着端口
+    const port = await pickFreePort(CDP_CANDIDATE_PORTS);
+    if (!port) {
+      console.log('ℹ️  调试端口 9222-9225 均被占用，尝试附加已有实例…');
+    } else {
+      console.log(`🌐 尝试启动 ${cand.name}（调试端口 ${port}）…`);
+      let launched = null;
+      try { launched = await launchSystemBrowser(cand, port, CHROME_PROFILE_DIR); } catch (_) { launched = null; }
+      if (launched) {
+        try {
+          const browser = await playwright.chromium.connectOverCDP(`http://${HOST}:${port}`, { timeout: 8000 });
+          const ctxs = browser.contexts ? browser.contexts() : [];
+          const context = ctxs[0] || await browser.newContext();
+          console.log(`   ✅ 已连接 ${cand.name}（CDP 端口 ${port}）。`);
+          return { mode: 'cdp', browser, context, browserName: cand.name, browserId: cand.id, cdpPort: port, proc: launched.proc, _workPage: null };
+        } catch (e) {
+          console.log(`   ✗ 连接 ${cand.name} 失败：${friendlyErr(e)}，尝试下一个浏览器。`);
+          try { launched.proc.kill(); } catch (_) {}
+        }
+      } else {
+        console.log(`   ✗ ${cand.name} 启动失败或调试端口无响应（常见于配置目录被已有调试浏览器占用）。`);
+      }
     }
+    // spawn 失败/端口被占：很可能命令行已被转发给一个持锁的旧实例 → 再试附加已有调试浏览器
+    try {
+      const existing = await connectExistingCdp(playwright);
+      if (existing) return existing;
+    } catch (_) { /* 继续下一候选 */ }
   }
+  console.log('ℹ️  CDP 模式不可用，将使用无头扫码模式。');
   return null;
 }
 
@@ -382,18 +448,34 @@ async function acquireSession() {
 }
 
 /**
- * 获取会话内的星图工作标签页：复用已打开的星图页，没有则新开并跳转达人广场。
+ * 在浏览器上下文里找一个可复用的标签页（v3.3：避免重复开 SSO 登录页）。
+ * 优先级：已在星图 /ad/ 创作者区的页 → 任意星图页 → 停在 SSO/登录页的页 → null。
+ */
+function findReusablePage(ctx) {
+  const pages = ctx.pages ? ctx.pages() : [];
+  const urlOf = (p) => { try { return p.url() || ''; } catch (_) { return ''; } };
+  const alive = pages.filter(p => { try { return p && !p.isClosed(); } catch (_) { return false; } });
+  return alive.find(p => { const u = urlOf(p); return /xingtu\.cn/.test(u) && /\/ad\//.test(u); })
+    || alive.find(p => /xingtu\.cn/.test(urlOf(p)))
+    || alive.find(p => /oceanengine\.com|sso|login/i.test(urlOf(p)))
+    || null;
+}
+
+/**
+ * 获取会话内的星图工作标签页：复用已打开的星图/SSO 页，没有才新开；
+ * 并确保最终落在星图 /ad/ 达人广场（打标接口必须在 www.xingtu.cn 同源下调用）。
  */
 async function sessionWorkPage(sess) {
   if (sess._workPage && !sess._workPage.isClosed()) return sess._workPage;
   const ctx = sess.context;
-  const pages = ctx.pages ? ctx.pages() : [];
-  let page = pages.find(p => { try { return /xingtu\.cn/.test(p.url()); } catch (_) { return false; } }) || null;
+  let page = findReusablePage(ctx);
   if (!page) page = await ctx.newPage();
   try { await page.setViewportSize({ width: 1280, height: 860 }); } catch (_) {}
   let url = '';
   try { url = page.url() || ''; } catch (_) {}
-  if (!/xingtu\.cn/.test(url)) {
+  // 不在星图 /ad/ 区域（SSO 登录页 / 营销首页 / about:blank）→ 导航到达人广场；
+  // 已登录会直接渲染广场，未登录会被重定向到 SSO（checkLoggedIn 据此判定）。
+  if (!(/xingtu\.cn/.test(url) && /\/ad\//.test(url))) {
     try {
       await page.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
       await page.waitForTimeout(2500); // 等 JS 渲染，避免误判登录态
@@ -553,6 +635,11 @@ const LOGIN_WAIT_MS = 180000; // 扫码最长等待 3 分钟
  * - CDP 模式：系统 Chrome/Edge 窗口已打开星图页，服务商在窗口里扫码；
  * - 无头模式：工具截取登录页二维码写入 _qr，前端 GET /login/qr 展示，
  *   服务商在网页上用手机抖音 App 扫码。
+ * ★ v3.3：① 复用浏览器里已有的星图/SSO 标签页，不重复开页；
+ *   ② 轮询时遍历【所有标签页】，任一标签进入星图 /ad/ 创作者区即判成功
+ *   （用户可能在启动时自带的那个标签页里登录，旧版只盯新开的页会漏判）；
+ *   ③ 登录后落在营销首页等非 /ad/ 页时，自动导航到达人广场做最终复核；
+ *   ④ 成功后工作页统一收敛到 /ad/ 广场页（打标同源调用），并全量回写 Cookie。
  * 返回 {ok, loggedIn, cancelled?, needInstall?, mode?, browserName?, message?}。
  * @param {{aborted:boolean}} signal 前端取消标志（请求中断时置 true）
  */
@@ -563,21 +650,51 @@ async function runLogin(signal) {
   } catch (e) {
     return { ok: false, loggedIn: false, needInstall: true, message: friendlyErr(e) };
   }
-  // 取一个工作标签页（复用已打开的；登录成功后它就是登录态广场页，供打标复用）
-  let page = sess._workPage;
-  if (!page || page.isClosed()) {
-    page = await sess.context.newPage().catch(() => null);
-    if (!page) return { ok: false, loggedIn: false, message: '无法打开浏览器标签页，请重试。', mode: sess.mode };
-    sess._workPage = page;
-    try { await page.setViewportSize({ width: 1360, height: 950 }); } catch (_) {}
-  }
 
-  // 已登录快速返回（页面在 /ad/ 广场区域）
-  if (await checkLoggedIn(page)) {
+  // 登录成功收尾：把工作页收敛到 /ad/ 广场、回写 Cookie、复位二维码状态
+  const finishLogin = async (loggedPage) => {
+    let work = loggedPage;
+    try {
+      const u = (() => { try { return work.url() || ''; } catch (_) { return ''; } })();
+      if (!(/xingtu\.cn/.test(u) && /\/ad\//.test(u))) {
+        await work.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+        await work.waitForTimeout(2500).catch(() => {});
+      }
+    } catch (_) { /* 导航失败不影响登录态判定 */ }
+    sess._workPage = work;
+    try { work.on('close', () => { if (sess._workPage === work) sess._workPage = null; }); } catch (_) {}
     writeCookieFile(await sess.context.cookies().catch(() => []));
     _qr = { status: 'loggedin', qrDataUrl: null, updatedAt: Date.now() };
+  };
+
+  // 遍历所有标签页，任一已登录即返回该页
+  const findLoggedInPage = async () => {
+    const pages = sess.context.pages ? sess.context.pages() : [];
+    for (const pg of pages) {
+      try {
+        if (!pg || pg.isClosed()) continue;
+        if (await checkLoggedIn(pg)) return pg;
+      } catch (_) { /* 页面跳转中，下轮再测 */ }
+    }
+    return null;
+  };
+
+  // 已登录快速返回（任一标签页在 /ad/ 广场区域）
+  let already = await findLoggedInPage();
+  if (already) {
+    await finishLogin(already);
     return { ok: true, loggedIn: true, mode: sess.mode, browserName: sess.browserName, message: '已是登录状态' };
   }
+
+  // 取登录驱动页：优先复用已停在 SSO/星图页的标签（用户可见、且与启动时打开的是同一个），没有才新开
+  let page = sess._workPage;
+  if (!page || page.isClosed()) page = findReusablePage(sess.context);
+  if (!page) {
+    page = await sess.context.newPage().catch(() => null);
+    if (!page) return { ok: false, loggedIn: false, message: '无法打开浏览器标签页，请重试。', mode: sess.mode };
+    try { await page.setViewportSize({ width: 1360, height: 950 }); } catch (_) {}
+  }
+  sess._workPage = page;
 
   // 未登录：导航到直达 SSO 登录页
   if (sess.mode === 'cdp') {
@@ -595,6 +712,7 @@ async function runLogin(signal) {
 
   const deadline = Date.now() + LOGIN_WAIT_MS;
   let lastReload = Date.now();
+  let lastSquareCheck = 0;
   while (Date.now() < deadline) {
     if (signal && signal.aborted) {
       console.log('ℹ️  用户取消了登录等待。');
@@ -611,12 +729,29 @@ async function runLogin(signal) {
         lastReload = Date.now();
       }
     }
-    let logged = false;
-    try { logged = await checkLoggedIn(page); } catch (_) { /* 页面跳转中，下轮再测 */ }
-    if (logged) {
-      writeCookieFile(await sess.context.cookies().catch(() => []));
-      _qr = { status: 'loggedin', qrDataUrl: null, updatedAt: Date.now() };
-      sess._workPage = page; // 登录态广场页，打标直接复用
+    // ① 所有标签页里找已登录的
+    let loggedPage = await findLoggedInPage();
+    // ② CDP 落地页复核：某标签已到 xingtu.cn 但不在 /ad/（营销首页/角色页等），
+    //    导航工作页到达人广场——已登录会渲染广场，未登录会被踢回 SSO。每 8 秒最多一次。
+    if (!loggedPage && sess.mode === 'cdp' && Date.now() - lastSquareCheck > 8000) {
+      lastSquareCheck = Date.now();
+      const landing = (sess.context.pages ? sess.context.pages() : []).find(p => {
+        try {
+          if (!p || p.isClosed()) return false;
+          const u = p.url() || '';
+          return /xingtu\.cn/.test(u) && !/\/ad\//.test(u) && !/redirect_uri|passport|sso|login/i.test(u);
+        } catch (_) { return false; }
+      });
+      if (landing) {
+        try {
+          await landing.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await landing.waitForTimeout(2500);
+          loggedPage = await findLoggedInPage();
+        } catch (_) { /* 下轮再试 */ }
+      }
+    }
+    if (loggedPage) {
+      await finishLogin(loggedPage);
       console.log('✅ 登录成功，Cookie 已备份到 .xc-cookies.json。');
       return { ok: true, loggedIn: true, mode: sess.mode, browserName: sess.browserName, message: '登录成功' };
     }
@@ -915,7 +1050,7 @@ function startServer() {
     } catch (_) { /* 探测失败按未登录处理 */ }
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.2.0', port: PORT,
+      ok: true, loggedIn, version: '3.3.0', port: PORT,
       loginUrl: SQUARE_URL,
       cookiesFile: '.xc-cookies.json',
       cookieCount,
@@ -1054,7 +1189,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.2.0');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.3.0');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
@@ -1089,6 +1224,9 @@ module.exports = {
   netTcpPortFree,
   checkLoggedIn,
   captureLoginQr,
+  connectExistingCdp,
+  cdpProbeOnce,
+  findReusablePage,
   tierOf,
   scoreConsumption,
   scoreDeliveries,
