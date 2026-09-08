@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.6
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.6.1
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，它会：
  *   1) 在 127.0.0.1:7842 起一个本地 HTTP 服务（只监听本机，不对外）；
@@ -9,18 +9,21 @@
  *      启动独立实例并 connectOverCDP 附加，也会先附加已在运行的调试 Chrome
  *      （9222-9225 端口探测）。浏览器真实可见，服务商在窗口里登录。
  *   3) 登录（仅需一次）：网页点「🚀 登录星图」→ POST /login，工具每 3 秒
- *      主动轮询所有标签页 URL（纯 URL 判定：xingtu.cn 下路径含 /ad 段即成功），
+ *      主动轮询所有标签页 URL（纯 URL 判定：xingtu.cn 下路径含 /ad 段
+ *      或 /sup/author/ 段即成功），
  *      扫码/账号密码/验证码均可；成功后写 Cookie 备份、CDP 模式自动关闭窗口，
  *      /health 内存登录位即时生效。超时 5 分钟。
  *   4) 打标：POST /tag 时后台自动重开浏览器（同一配置目录免登录）：
  *      · ★ v3.6 主链路改为「ID 直进达人主页」：直接用名单里的达人 ID 访问
- *        /ad/creator/detail/{id}，拦截主页 XHR/fetch 响应（拦截不到则降级
- *        解析 DOM），一次拿到达人资料（星川等级 S0-S5 / 交付项目数 /
- *        星图消耗 / 电商等级 / 粉丝数 / 内容主题标签）与【前三个视频】的
- *        标题/播放/点赞/内容形式，输出 videoAnalysis；视频标题反哺
- *        forms/persona/industry 标签（只补充不覆盖）；
- *      · 主页打不开（ID 无效 / 达人未入驻星图 / 被重定向）才降级用昵称调
- *        达人广场搜索接口兜底；两条路都失败才报「未检索到」；
+ *        v3.6.1 起为 /sup/author/detail/{id}（旧 /ad/creator/detail/{id} 在
+ *        普通星图账号下会被重定向导致「未检索到」），拦截主页 XHR/fetch
+ *        响应（拦截不到则降级解析 DOM），一次拿到达人资料（星川等级 S0-S5
+ *        / 交付项目数 / 星图消耗 / 电商等级 / 粉丝数 / 内容主题标签）与
+ *        【前三个视频】的标题/播放/点赞/内容形式，输出 videoAnalysis；
+ *        视频标题反哺 forms/persona/industry 标签（只补充不覆盖）；
+ *      · 主页打不开（ID 无效 / 达人未入驻星图 / 被重定向）才降级到达人广场
+ *        （v3.6.1 起广场页为 /pro/ad/pages/market）用昵称/ID 搜索兜底；
+ *        两条路都失败才报「未检索到」；
  *      · XC_TAGGER_DEBUG=1 时落截图+接口 JSON+DOM 状态到 .xc-debug/
  *        供真机校准；每达人间隔 800ms 防风控。
  *   5) 评分双库口径：
@@ -60,12 +63,13 @@ const HOST = '127.0.0.1';
 const COOKIES_FILE = path.resolve(__dirname, '.xc-cookies.json');
 // 巨量星图 · 达人广场（广告主侧）。抓取接口与该页同源(www.xingtu.cn)，注入 Cookie 后天然带登录态。
 const XINGTU_ORIGIN = 'https://www.xingtu.cn';
-const SQUARE_URL = 'https://www.xingtu.cn/ad/creator/square';
+// v3.6.1：达人广场改为新路径 /pro/ad/pages/market（旧 /ad/creator/square 在普通账号下已重定向/失效）。
+const SQUARE_URL = 'https://www.xingtu.cn/pro/ad/pages/market';
 // 巨量引擎统一登录直达页（role=1 客户侧）：未登录访问达人广场会被踢到此 SSO。
 // 直接导航到它可省去「营销首页→点登录→选客户角色」几步点击，真机/无头都更稳；
 // 登录成功后 SSO 自动回跳 redirect_uri（达人广场）。
 const LOGIN_URL = 'https://sso.oceanengine.com/xingtu/login?redirect_uri=' +
-  encodeURIComponent('/ad/creator/square') + '&role=1';
+  encodeURIComponent('/pro/ad/pages/market') + '&role=1';
 // 固定一个常见桌面 UA，避免无头浏览器被星图风控识别
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const DEBUG_DUMP = process.env.XC_TAGGER_DEBUG === '1'; // 调试：把原始响应落盘
@@ -609,7 +613,10 @@ function isLoggedInUrl(url) {
     path = p.pathname || '';
   } catch (_) { return false; }
   if (!/(^|\.)xingtu\.cn$/i.test(host)) return false;      // 主机名必须是星图域名（含子域）
-  if (!/(^|\/)ad(?:\/|$)/i.test(path)) return false;       // 路径必须含 /ad 段（创作者/广告主区域）
+  // v3.6.1：登录区域 = /ad/ 段（创作者/广告主，含新广场 /pro/ad/pages/market）
+  //          或 /sup/author/ 段（创作者主页 /sup/author/detail/{id}，v3.6.1 主链路新路径）。
+  //          依据：未登录访问这两类页面都会被重定向到 sso.oceanengine.com（离开 xingtu.cn）。
+  if (!/(^|\/)ad(?:\/|$)/i.test(path) && !/^\/sup\/author\//i.test(path)) return false;
   if (/\/(sso|passport|login)(?:\/|$)/i.test(path)) return false; // 仍在登录链路
   return true;
 }
@@ -1040,7 +1047,9 @@ function scoreAuthor(auth, opts = {}) {
 }
 
 // ---- v3.5：达人主页视频分析（进达人详情页抓前三个视频，辅助内容方向判断与加分）-------
-const CREATOR_DETAIL_URL = (id) => `https://www.xingtu.cn/ad/creator/detail/${id}`;
+// v3.6.1：创作者主页改走 /sup/author/detail/{id}（旧 /ad/creator/detail/{id} 在普通星图账号下
+// 会被重定向到广场/SSO，导致「未检索到」）；XHR 拦截关键字与 DOM 降级解析均与路径无关，自动适用。
+const CREATOR_DETAIL_URL = (id) => `https://www.xingtu.cn/sup/author/detail/${id}`;
 
 // "12.5万"/"1.2亿"/"3w"/纯数字 → 数字
 function parseMediaCount(t) {
@@ -1125,7 +1134,7 @@ function domVideoCardsEval() {
 /**
  * v3.6：浏览器侧——读取达人主页状态与 DOM 资料（纯浏览器 JS，不引用 Node 侧变量）。
  * 返回：{ url, onDetail, notFound, headText, chips, name }
- *  - onDetail：最终 URL 仍停在 /ad/creator/detail/{数字}（被重定向到广场/SSO 则 false）
+ *  - onDetail：最终 URL 仍停在创作者详情页（v3.6.1：/sup/author/detail/{数字}；旧 /ad/creator/detail/{数字} 兼容），被重定向到广场/SSO 则 false
  *  - notFound：正文含「达人不存在/未入驻/404」等失效文案
  *  - headText：正文前 3000 字（Node 侧正则提取粉丝/等级/项目/消耗）
  *  - chips：页面上可见的短标签（内容主题/类目），过滤数字与操作按钮
@@ -1135,7 +1144,7 @@ function domHomeStateEval() {
   const out = { url: '', onDetail: false, notFound: false, headText: '', chips: [], name: '' };
   try {
     out.url = location.href;
-    out.onDetail = /\/ad\/creator\/detail\/\d+/.test(out.url);
+    out.onDetail = /\/(?:sup\/author|ad\/creator)\/detail\/\d+/.test(out.url);
     const text = (document.body && document.body.innerText || '').replace(/\s+/g, ' ').trim();
     out.headText = text.slice(0, 3000);
     out.notFound = /达人不存在|创作者不存在|达人已注销|账号已注销|页面不存在|找不到相关|未入驻|暂无权限|没有权限|内容不存在|\b404\b/.test(text.slice(0, 1000));
@@ -1283,7 +1292,7 @@ function mergeAuth(base, extra) {
 
 /**
  * v3.6 打标主链路：直接用达人 ID 进入星图创作者主页
- * （https://www.xingtu.cn/ad/creator/detail/{id}），一次访问同时拿到：
+ * （v3.6.1：https://www.xingtu.cn/sup/author/detail/{id}；旧 /ad/creator/detail/{id} 普通账号会被重定向），一次访问同时拿到：
  *   ① 达人资料：星川等级 / 交付项目数 / 星图消耗 / 电商等级 / 粉丝数 / 内容主题标签
  *      ——优先拦截主页 XHR/fetch 响应挖达人对象（ID 精确匹配），拦截不到则
  *        降级解析主页 DOM（头部文本正则 + 标签 chips）；
@@ -1521,7 +1530,7 @@ function startServer() {
     if (loggedIn) _loggedIn = true;
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.6.0', port: PORT,
+      ok: true, loggedIn, version: '3.6.1', port: PORT,
       loginUrl: SQUARE_URL,
       cookiesFile: '.xc-cookies.json',
       cookieCount,
@@ -1729,7 +1738,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.6.0');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.6.1');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
