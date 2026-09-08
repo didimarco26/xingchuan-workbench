@@ -1,8 +1,8 @@
 {
   "name": "xc-tagger",
-  "version": "1.0.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "星川服务商达人自助打标 · 本地一键工具（Playwright 复用本机已登录的星图 Cookie，抓取达人广场信息并按存量达人逻辑分层打标）",
+  "description": "星川服务商达人自助打标 · 本地一键工具 v3（点「登录星图」弹窗扫码登录，无需插件；无头后台抓取星川等级/交付项目/星图消耗/电商等级，按存量达人逻辑分层打标）",
   "main": "xc-tagger.js",
   "bin": {
     "xc-tagger": "xc-tagger.js"

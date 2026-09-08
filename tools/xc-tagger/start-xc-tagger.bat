@@ -2,64 +2,14 @@
 chcp 65001 >nul 2>&1
 setlocal enabledelayedexpansion
 
-set "SRCDIR=%~dp0"
-set "RUNDIR=%~dp0"
+cd /d "%~dp0"
 
 echo ============================================
-echo   Xingchuan Tagger - starting...
+echo   Xingchuan Tagger v3 - starting...
+echo   (runs locally; a Chrome window pops up
+echo    only when you click "Login to Xingtu")
 echo ============================================
 echo.
-
-rem --- 0) Path check: spaces/brackets in the folder path make Chromium --user-data-dir fail
-rem     (browser exits immediately, login cookies cannot be saved). This usually happens when
-rem     Windows renames a duplicate download to "xc-tagger-win-v1 (2)".
-rem     We AUTO-COPY the tool to a clean path (%USERPROFILE%\xc-tagger, fallback C:\xc-tagger)
-rem     and run it from there - no manual action needed.
-rem     NOTE: goto labels are used instead of ( ... ) blocks because a ")" in the path
-rem     would close a parenthesized block early.
-set "BADP=0"
-echo "%SRCDIR%" | findstr /C:" " >nul 2>&1
-if not errorlevel 1 set "BADP=1"
-echo "%SRCDIR%" | findstr /C:"(" >nul 2>&1
-if not errorlevel 1 set "BADP=1"
-echo "%SRCDIR%" | findstr /C:")" >nul 2>&1
-if not errorlevel 1 set "BADP=1"
-if "%BADP%"=="1" goto :migrate
-goto :run
-
-:migrate
-set "TARGET=%USERPROFILE%\xc-tagger"
-echo "%TARGET%" | findstr /C:" " >nul 2>&1
-if not errorlevel 1 set "TARGET=C:\xc-tagger"
-echo "%TARGET%" | findstr /C:"(" >nul 2>&1
-if not errorlevel 1 set "TARGET=C:\xc-tagger"
-echo.
-echo ==================================================
-echo  [NOTICE] Current folder path contains spaces or brackets:
-echo     %SRCDIR%
-echo  The browser cannot save login state in such a path.
-echo  Auto-copying the tool to a clean path:
-echo     %TARGET%
-echo ==================================================
-echo.
-if not exist "%TARGET%" mkdir "%TARGET%"
-rem /E = copy subdirs incl. empty; /XD excludes the old (unusable) browser profile
-robocopy "%SRCDIR%." "%TARGET%" /E /XD .xc-chrome-profile /NFL /NDL /NJH /NJS /NC /NS /NP
-if errorlevel 8 (
-  echo.
-  echo [ERROR] Auto-copy failed. Please MANUALLY move the xc-tagger folder
-  echo         to a path without spaces or brackets, e.g. C:\xc-tagger
-  echo         then double-click start-xc-tagger.bat again.
-  echo.
-  pause
-  exit /b 1
-)
-set "RUNDIR=%TARGET%\"
-echo [OK] Copied. Starting from %TARGET%
-echo.
-
-:run
-cd /d "%RUNDIR%"
 
 rem 1) Check Node.js
 where node >nul 2>&1
@@ -85,7 +35,6 @@ if not exist node_modules (
 )
 
 rem 3) Ensure Playwright's OWN Chromium is installed (run every time - already installed = a few seconds)
-rem    This forces Playwright's Chromium and prevents using system Edge (Edge exits when automated)
 echo Checking Playwright Chromium browser...
 call npx playwright install chromium
 if errorlevel 1 (
@@ -97,13 +46,21 @@ if errorlevel 1 (
 )
 echo [OK] Chromium ready.
 
-rem 4) Start the tool
+rem 4) Start the tool (stays in background; click "Login to Xingtu" on the web page to scan QR)
 echo.
 echo ==================================================
-echo  Xingchuan Tagger is running.
-echo  Run from      : %RUNDIR%
+echo  Xingchuan Tagger is running v3 (local service).
+echo  Run from      : %~dp0
 echo  Local service : http://127.0.0.1:7842
 echo  Workbench page: https://didimarco26.github.io/xingchuan-workbench/
+echo.
+echo  3 STEPS:
+echo    1. Keep this window open;
+echo    2. On the workbench page, click the "Login to Xingtu" button -
+echo       a Chrome window pops up, scan the QR code to log in,
+echo       the window closes automatically (one time only, no plugin needed);
+echo    3. Upload your influencer Excel and click "Start Tagging".
+echo.
 echo  Keep this window open while using the tool.
 echo  Close the window (or press Ctrl+C) to stop.
 echo ==================================================

@@ -2,44 +2,14 @@
 # ============================================================
 # 星川服务商达人打标工具 · Mac 一键启动
 # 双击本文件即可运行（前提：已安装 Node.js 18+，https://nodejs.org）
+# 工具后台常驻；在工作台网页点「登录星图」会弹出 Chrome 窗口扫码，登录后自动关窗。
 # ============================================================
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-RUN_DIR="$SCRIPT_DIR"
-
-# 0) 路径检测与自动迁移：
-#    文件夹路径含空格/括号时（常见于 Mac 给重复下载自动加 " 2" 后缀），
-#    Chromium 的 --user-data-dir 会解析失败、浏览器启动即退出，登录态无法保存。
-#    此时自动把工具复制到干净路径 ~/xc-tagger 并从那里启动，用户无需手动操作。
-if echo "$SCRIPT_DIR" | grep -qE '[ ()]'; then
-  TARGET="$HOME/xc-tagger"
-  if echo "$TARGET" | grep -qE '[ ()]'; then
-    TARGET="/tmp/xc-tagger"   # 极端情况：用户主目录本身也含空格
-  fi
-  echo ""
-  echo "=================================================="
-  echo "  [注意] 当前工具所在路径含空格或括号："
-  echo "    $SCRIPT_DIR"
-  echo "  该路径下浏览器无法保存登录态，正在自动复制到干净路径："
-  echo "    $TARGET"
-  echo "=================================================="
-  echo ""
-  mkdir -p "$TARGET" || { echo "❌ 无法创建 $TARGET，请手动把 xc-tagger 文件夹移到不含空格的路径（如 ~/xc-tagger）后重试。"; read -n 1; exit 1; }
-  if command -v ditto >/dev/null 2>&1; then
-    ditto "$SCRIPT_DIR" "$TARGET" || { echo "❌ 复制失败，请手动移动文件夹后重试。"; read -n 1; exit 1; }
-  else
-    cp -R "$SCRIPT_DIR/." "$TARGET/" || { echo "❌ 复制失败，请手动移动文件夹后重试。"; read -n 1; exit 1; }
-  fi
-  rm -rf "$TARGET/.xc-chrome-profile"   # 旧路径下的 profile 本就无法保存登录态，不带走
-  RUN_DIR="$TARGET"
-  echo "✅ 已复制完成，将从 $RUN_DIR 启动工具。"
-  echo ""
-fi
-
-cd "$RUN_DIR" || exit 1
+cd "$(dirname "$0")" || exit 1
+RUN_DIR="$(pwd)"
 
 echo "============================================"
-echo "   星川打标工具启动中..."
+echo "   星川打标工具启动中... v3"
 echo "   运行目录：$RUN_DIR"
 echo "============================================"
 echo ""
@@ -69,7 +39,6 @@ if [ ! -d node_modules ]; then
 fi
 
 # 3) 确保 Playwright 自带 Chromium 已安装（每次启动都执行，已装则秒过，未装则自动下载）
-#    强制用 Playwright 自己的 Chromium，不用系统 Edge/Chrome（Edge 被自动化控制后会主动退出）
 echo "⏳ 正在验证 Playwright Chromium 浏览器..."
 npx playwright install chromium
 if [ $? -ne 0 ]; then
@@ -80,12 +49,19 @@ if [ $? -ne 0 ]; then
 fi
 echo "   Chromium 已就绪。"
 
-# 4) 启动工具
+# 4) 启动工具（后台常驻；点「登录星图」时弹窗扫码）
 echo ""
 echo "=================================================="
-echo "  星川打标工具已启动"
+echo "  星川打标工具已启动 v3（本地服务常驻）"
 echo "  本地服务：http://127.0.0.1:7842"
 echo "  工作台网页：https://didimarco26.github.io/xingchuan-workbench/"
+echo ""
+echo "  使用 3 步："
+echo "   1) 保持本窗口打开；"
+echo "   2) 在工作台网页点「🚀 登录星图」，本机弹出 Chrome 窗口，"
+echo "      扫码登录后窗口自动关闭（仅需一次，无需任何插件）；"
+echo "   3) 上传达人名单 Excel，点「开始打标」等待结果。"
+echo ""
 echo "  使用过程中请保持本窗口打开，关闭窗口即停止工具"
 echo "=================================================="
 echo ""

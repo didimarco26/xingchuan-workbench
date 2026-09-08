@@ -1,21 +1,28 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger)
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，它会：
  *   1) 在 127.0.0.1:7842 起一个本地 HTTP 服务（只监听本机，不对外）；
- *   2) 用 Playwright 打开持久化 Chrome（登录态保存在 .xc-chrome-profile/），
- *      首次运行自动打开「巨量星图 · 达人广场」，扫码登录一次即可长期复用；
- *   3) 网页（星川决策工作台·服务商 GitHub 版）调用本地接口：
- *        GET  /health  → 探测服务与登录状态
- *        POST /parse   → 解析上传的 Excel/CSV 达人名单，提取 达人ID / 昵称
- *        POST /tag     → 用星图登录态抓取达人信息并按存量逻辑分层打标
- *   Cookie / 登录态只留在服务商本机（.xc-chrome-profile/），不上传、不落库。
+ *   2) 登录（仅需一次）：网页点「🚀 登录星图」→ POST /login 启动一个【有界面
+ *      headed Chromium 窗口】打开巨量星图达人广场，服务商在窗口里扫码/验证码
+ *      登录；工具每 2 秒检测一次，检测到登录成功后把 Cookie 写入本机
+ *      .xc-cookies.json 并自动关闭窗口（超时 180 秒；窗口被手动关闭/网页点
+ *      「取消」都会中止本次登录）。
+ *   3) 打标：POST /tag 仍以【无头 headless 模式】后台运行 Chromium（不弹窗），
+ *      启动时自动加载 .xc-cookies.json；检测到有效会话时自动回写刷新 Cookie。
+ *      headed 与 headless 是两个独立浏览器实例，登录态靠 .xc-cookies.json 传递。
+ *   4) 网页（星川决策工作台·服务商 GitHub 版）调用本地接口：
+ *        GET  /health   → 探测服务与登录状态（含 loginPending 扫码等待标志）
+ *        POST /login    → 弹出 Chrome 窗口扫码登录，成功后自动关窗
+ *        POST /parse    → 解析上传的 Excel/CSV 达人名单，提取 达人ID / 昵称
+ *        POST /tag      → 用星图登录态抓取达人信息并按存量逻辑分层打标
+ *   Cookie 只留在服务商本机（.xc-cookies.json），不上传、不落库。
  *
  * 运行：
  *   1. npm install        （首次，会自动安装 Playwright Chromium）
- *   2. node xc-tagger.js  （启动后按提示在弹出的 Chrome 里扫码登录星图）
+ *   2. node xc-tagger.js  （后台无头运行；在网页里点「登录星图」弹窗扫码即可）
  *
  * 安全：CORS 仅放行 didimarco26.github.io 与本机页面；服务只绑定 127.0.0.1。
  */
@@ -24,20 +31,9 @@
 
 const path = require('path');
 
-// 启动防御（必须早于任何外部依赖 require）：工具所在路径含空格/括号时，
-// Chromium --user-data-dir 会解析失败、浏览器启动即退出（has been closed），登录态无法保存。
-// 正常双击启动脚本会先自动迁移到干净路径；走到这里说明是在坏路径里直接命令行运行的。
-if (/[ ()]/.test(__dirname)) {
-  console.error('\n==================================================');
-  console.error('[ERROR] 工具所在文件夹路径含空格或括号：');
-  console.error('  ' + __dirname);
-  console.error('该路径下 Chromium 无法启动，星图登录态也无法保存。');
-  console.error('请双击 start-xc-tagger.command（Mac）/ start-xc-tagger.bat（Windows）启动，');
-  console.error('启动脚本会自动把工具复制到干净路径（如 ~/xc-tagger 或 C:\\xc-tagger）；');
-  console.error('或手动把整个 xc-tagger 文件夹移动到不含空格/括号的路径后重试。');
-  console.error('==================================================\n');
-  process.exit(2);
-}
+// 说明：打标使用【无头 Chromium + Cookie 文件】；登录时临时启动【有界面 Chromium】
+// 弹窗扫码，登录成功后 Cookie 落盘到 .xc-cookies.json，窗口自动关闭。不使用
+// --user-data-dir 持久化目录，工具所在路径含空格/括号也能正常运行。
 
 const express = require('express');
 const cors = require('cors');
@@ -47,12 +43,14 @@ const fs = require('fs');
 // ---- 配置 ----------------------------------------------------------------
 const PORT = 7842;
 const HOST = '127.0.0.1';
-// Profile 目录：必须是绝对路径。含空格/括号的路径会让 Chromium --user-data-dir 解析失败、
-// 浏览器启动即退出（launchPersistentContext: Target page, context or browser has been closed）。
-const PROFILE_DIR = path.resolve(__dirname, '.xc-chrome-profile');
-// 巨量星图 · 达人广场（广告主侧）。抓取接口与该页同源(www.xingtu.cn)，天然带 Cookie。
+// 登录态文件：保存星图 Cookie（Playwright 格式 JSON 数组）。无头 Chromium 启动时加载，
+// 检测到已登录会话时自动回写刷新。含登录凭证，严禁提交 / 外传（已在 .gitignore 忽略）。
+const COOKIES_FILE = path.resolve(__dirname, '.xc-cookies.json');
+// 巨量星图 · 达人广场（广告主侧）。抓取接口与该页同源(www.xingtu.cn)，注入 Cookie 后天然带登录态。
 const XINGTU_ORIGIN = 'https://www.xingtu.cn';
 const SQUARE_URL = 'https://www.xingtu.cn/ad/creator/square';
+// 固定一个常见桌面 UA，避免无头浏览器被星图风控识别
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const DEBUG_DUMP = process.env.XC_TAGGER_DEBUG === '1'; // 调试：把原始响应落盘
 
 // 仅允许以下来源的网页调用本地服务（安全限制）
@@ -178,42 +176,147 @@ function getPlaywrightChromiumPath() {
   return exePath;
 }
 
+// ---- Cookie 登录态（无头打标 + 有界面登录）----------------------------------
+function readCookieFile() {
+  try {
+    if (!fs.existsSync(COOKIES_FILE)) return [];
+    const arr = JSON.parse(fs.readFileSync(COOKIES_FILE, 'utf8'));
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) { return []; }
+}
+
+// 逐条注入 Cookie，单条失败不影响其余，返回成功条数
+async function addCookiesSafe(ctx, cookies) {
+  let ok = 0;
+  for (const ck of cookies) {
+    try { await ctx.addCookies([ck]); ok++; } catch (_) { /* 跳过非法 / 过期项 */ }
+  }
+  return ok;
+}
+
 async function ensureBrowser() {
-  if (_browser && _page && _browser.isConnected && _browser.isConnected()) return _page;
+  if (_browser && _browser.isConnected && _browser.isConnected() && _page && !_page.isClosed()) return _page;
   if (_launching) return _launching;
   _launching = (async () => {
     const exePath = getPlaywrightChromiumPath();
-    console.log('✅ 使用 Chromium：' + exePath);
-    fs.mkdirSync(PROFILE_DIR, { recursive: true });
+    console.log('✅ 使用 Chromium（无头后台运行，不弹窗）：' + exePath);
     const playwright = require('playwright');
-    _browser = await playwright.chromium.launchPersistentContext(PROFILE_DIR, {
+    // 用普通 launch（非持久化）+ headless:true：Windows 安全策略下 headless:false 弹窗的
+    // Chromium 会被直接关闭（exitCode=0，报 "Target page, context or browser has been closed"）；
+    // 无头模式不弹窗、稳定运行，登录态靠 Cookie 文件注入。
+    _browser = await playwright.chromium.launch({
       executablePath: exePath, // 锁定 Playwright 自带 Chromium，不用系统 Edge/Chrome
-      headless: false,
-      viewport: { width: 1280, height: 860 },
-      args: ['--disable-blink-features=AutomationControlled', '--start-maximized'],
+      headless: true,
+      args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
     });
-    let page = _browser.pages && _browser.pages()[0];
-    if (!page) page = await _browser.newPage();
-    _page = page;
-    try { await page.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }); } catch (_) { /* 登录跳转/网络波动忽略 */ }
-    _browser.on('close', () => { _browser = null; _page = null; _launching = null; });
+    const ctx = await _browser.newContext({
+      userAgent: UA,
+      viewport: { width: 1280, height: 860 },
+    });
+    // 注入已保存的星图 Cookie
+    const saved = readCookieFile();
+    if (saved.length) {
+      const n = await addCookiesSafe(ctx, saved);
+      if (n > 0) console.log('✅ 已加载星图登录 Cookie（' + n + ' 条）');
+    }
+    _page = await ctx.newPage();
+    try {
+      await _page.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await _page.waitForTimeout(2500); // 等页面 JS 渲染，避免误判登录态
+    } catch (_) { /* 网络波动忽略 */ }
+    _browser.on('disconnected', () => { _browser = null; _page = null; _launching = null; });
     return _page;
   })();
   try { return await _launching; } finally { _launching = null; }
 }
 
-// 是否已登录：URL 含 redirect_uri（被踢去登录）或页面出现登录按钮，则视为未登录
+// 是否已登录：必须真正进入星图「创作者/广告主」区域才算已登录——
+//   · URL 含 redirect_uri / passport / sso / login（被踢去登录）→ 未登录；
+//   · URL 不在 xingtu.cn 或不含 /ad/ 路径（停在营销首页 www.xingtu.cn/）→ 未登录；
+//   · 页面空白（加载失败/网络异常）→ 未登录（宁可让用户重新扫码，不可误判已登录）；
+//   · 页面出现扫码/手机号登录入口且无达人广场特征 → 未登录。
+// 已登录时自动把最新 Cookie 回写文件（刷新有效期），实现长期免登录。
 async function checkLoggedIn(page) {
   try {
     const url = page.url() || '';
-    if (/redirect_uri|login|passport/.test(url)) return false;
-    return await page.evaluate(() => {
+    if (/redirect_uri|passport|sso|login/i.test(url)) return false;
+    if (!/xingtu\.cn\//.test(url)) return false;
+    if (!/\/ad\//.test(url)) return false;
+    const loggedIn = await page.evaluate(() => {
       const t = document.body ? document.body.innerText : '';
-      // 出现明显「扫码登录 / 登录」入口且无达人广场特征，判为未登录
-      const hasLoginBtn = /扫码登录|登录巨量星图|手机号登录|验证码登录/.test(t) && !/达人广场|找达人|达人榜单/.test(t);
+      if (t.trim().length < 40) return false; // 空白页/加载中，不能判定已登录
+      // 出现明显「扫码登录 / 手机号登录」入口且无达人广场特征，判为未登录
+      const hasLoginBtn = /扫码登录|登录巨量星图|手机号登录|验证码登录|免费登录/.test(t) && !/达人广场|找达人|达人榜单/.test(t);
       return !hasLoginBtn;
     });
+    if (loggedIn) {
+      try {
+        const cookies = await page.context().cookies();
+        if (Array.isArray(cookies) && cookies.length) {
+          fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2), 'utf8');
+        }
+      } catch (_) { /* 回写失败不影响判定 */ }
+    }
+    return loggedIn;
   } catch { return false; }
+}
+
+// ---- 有界面登录（headed Chromium 弹窗扫码）---------------------------------
+// /login 正在等待扫码时为 true，/health 据此让前端显示「等待扫码中…」。
+let _loginPending = false;
+const LOGIN_WAIT_MS = 180000; // 扫码最长等待 3 分钟
+
+/**
+ * 启动一个【有界面】Chromium 窗口打开星图达人广场，轮询检测登录态。
+ * 成功：Cookie 落盘 .xc-cookies.json，关窗返回 {ok:true}；
+ * 失败：超时 / 窗口被关 / 前端取消，关窗返回 {ok:false,message}。
+ * @param {{aborted:boolean}} signal 前端取消标志（请求中断时置 true）
+ */
+async function headedLogin(signal) {
+  const playwright = require('playwright');
+  const exePath = getPlaywrightChromiumPath();
+  console.log('🟢 启动有界面 Chromium 供扫码登录：' + exePath);
+  const browser = await playwright.chromium.launch({
+    executablePath: exePath,
+    headless: false, // 有界面，供服务商扫码
+    args: ['--disable-blink-features=AutomationControlled'],
+  });
+  let disconnected = false;
+  browser.on('disconnected', () => { disconnected = true; });
+  try {
+    const ctx = await browser.newContext({
+      userAgent: UA,
+      viewport: { width: 1280, height: 800 },
+    });
+    const page = await ctx.newPage();
+    try {
+      await page.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    } catch (e) {
+      console.log('⚠️ 打开星图页面异常（仍可在窗口内手动刷新）：' + friendlyErr(e));
+    }
+    const deadline = Date.now() + LOGIN_WAIT_MS;
+    while (Date.now() < deadline) {
+      if (disconnected) return { ok: false, message: '登录窗口被关闭，请重新点「登录星图」再试' };
+      if (signal && signal.aborted) return { ok: false, message: '已取消登录' };
+      let logged = false;
+      try { logged = await checkLoggedIn(page); } catch (_) { /* 页面跳转中，下轮再测 */ }
+      if (logged) {
+        // checkLoggedIn 成功时已回写一次 Cookie，这里再显式落盘兜底
+        try {
+          const cookies = await ctx.cookies();
+          if (Array.isArray(cookies) && cookies.length) {
+            fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2), 'utf8');
+          }
+        } catch (_) { /* 忽略 */ }
+        console.log('✅ 扫码登录成功，Cookie 已保存到 .xc-cookies.json');
+        return { ok: true, loggedIn: true, message: '登录成功，登录窗口即将自动关闭' };
+      }
+      await sleep(2000);
+    }
+    return { ok: false, loggedIn: false, message: '登录超时（3 分钟内未检测到登录成功），请重试' };
+  } finally {
+    try { await browser.close(); } catch (_) { /* 已关闭则忽略 */ }
+  }
 }
 
 // ---- 星图接口抓取（在页面上下文内 fetch，同源自动带 Cookie）----------------
@@ -276,6 +379,62 @@ function fansTierOf(fans) {
   return '';
 }
 
+// ---- 存量达人库受控词表（与飞书多维表格 tblUXi2raUVtv3et 多选字段选项一致）-----
+// 人设标签/内容形式/行业标签在存量库里都是固定选项的多选字段，打标输出直接映射到
+// 这些受控词，方便结果 CSV 直接回填/导入存量库；匹配不到就留空，绝不臆造。
+const STOCK_PERSONA_RULES = [
+  ['美妆护肤达人', /美妆|护肤|彩妆|口红|面膜|香水|粉底/],
+  ['母婴亲子达人', /母婴|亲子|宝宝|育儿|孕|婴|奶爸|奶妈/],
+  ['服饰穿搭达人', /穿搭|服饰|服装|男装|女装|鞋靴|鞋|搭配|时尚/],
+  ['美食测评达人', /美食|零食|吃播|吃货|探店|饮品|餐饮|料理|好吃|(?<!宠物)食品(?!猫|狗)/],
+  ['家居清洁达人', /家居|家清|清洁|收纳|家务|居家好物/],
+  ['剧情娱乐达人', /剧情|搞笑|娱乐|段子|情景剧|综艺|演绎/],
+  ['专业测评达人', /测评|评测|开箱|体验|实验|实测/],
+  ['女性种草达人', /种草|爱用物|好物分享|好物推荐/],
+  ['生活好物推荐官', /生活好物|生活技巧|生活小窍|实用好物/],
+];
+const STOCK_FORM_RULES = [
+  ['好物评测', /评测|测评/],
+  ['对比测评', /对比/],
+  ['开箱展示', /开箱/],
+  ['教程教学', /教程|教学|攻略|怎么|技巧|方法/],
+  ['清单合集', /清单|合集|盘点/],
+  ['剧情植入', /剧情|情景剧|段子|演绎/],
+  ['口播讲解', /口播|讲解|解说/],
+  ['直播切片', /直播/],
+  ['产品种草', /种草/],
+  ['生活记录', /生活|vlog|日常|记录/],
+];
+const STOCK_INDUSTRY_RULES = [
+  ['美妆', /美妆|彩妆|口红|面膜|香水|粉底/],
+  ['个人护理', /护肤|个护|洗护|洗发|沐浴|牙膏|护发|身体乳/],
+  ['母婴用品', /母婴|婴|孕|宝宝|育儿/],
+  ['服装', /服装|穿搭|男装|女装|鞋/],
+  ['食品饮料', /(?<!宠物)食品(?!猫|狗)|零食|美食|吃/],
+  ['水饮冲调', /饮品|饮料|冲调|咖啡|奶茶|水饮/],
+  ['生鲜食品', /生鲜/],
+  ['家清纸品', /家清|清洁|纸巾|洗衣|纸品/],
+  ['家居家装', /家居|家装|家具|收纳/],
+  ['3C数码家电', /3c|数码|家电|电器|手机|电脑/],
+  ['运动户外', /运动|户外|健身|瑜伽/],
+  ['宠物生活', /宠物|猫|狗/],
+  ['健康滋补', /滋补|保健|养生|营养/],
+  ['珠宝配饰', /珠宝|配饰|首饰/],
+  ['图书教育', /图书|教育|课程/],
+  ['本地生活', /本地生活|探店/],
+];
+// 按关键词命中受控词表，保持词表顺序，最多取 cap 个
+function matchControlled(text, rules, cap) {
+  const out = [];
+  const s = String(text || '').toLowerCase();
+  if (!s) return out;
+  for (const [name, re] of rules) {
+    if (re.test(s) && !out.includes(name)) out.push(name);
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
 // 把星图原始达人对象映射为打标所需指标（字段名按存量达人库口径对齐）
 function mapAuthor(raw) {
   const blob = JSON.stringify(raw);
@@ -301,13 +460,16 @@ function mapAuthor(raw) {
   // 星图消耗（元）
   const consumption = Number(pick(raw, [/consume|consumption|spend|星图_?消耗|消耗|gmv|amount|cost/i])) || 0;
   // —— 存量达人库标签字段（尽力提取；星图接口返回则带出，无则留空，不臆造）——
-  // 达人人设标签（如：测评/剧情/种草/知识…）
-  const persona = normText(pick(raw, [/persona|人设|标签|tag|label/i])).split(/[、,，/|]/).map(s => s.trim()).filter(Boolean).slice(0, 5);
-  // 内容形式标签（短视频/直播/图文…）
-  const forms = normText(pick(raw, [/content_?type|内容_?形式|形式|video_?type|material/i])).split(/[、,，/|]/).map(s => s.trim()).filter(Boolean).slice(0, 5);
-  // 主要带货类目 / 行业
+  // 原始人设/内容形式/类目文本先从接口字段尽力提取，再映射到存量库受控词表
+  // （达人人设标签/内容形式标签/行业标签均为固定选项多选字段），匹配不到则留空。
+  const personaRaw = normText(pick(raw, [/persona|人设|标签|tag|label/i])).split(/[、,，/|]/).map(s => s.trim()).filter(Boolean);
+  const formsRaw = normText(pick(raw, [/content_?type|内容_?形式|形式|video_?type|material/i])).split(/[、,，/|]/).map(s => s.trim()).filter(Boolean);
   const category = normText(pick(raw, [/category|cate|类目|行业|industry|vertical/i])).slice(0, 60);
-  return { id, name, fans, fansTier, sLevel, lLevel, deliveries, consumption, persona, forms, category, raw };
+  const evidence = [].concat(personaRaw, formsRaw, [category]).join(' ');
+  const persona = matchControlled(evidence, STOCK_PERSONA_RULES, 3);
+  const forms = matchControlled(evidence, STOCK_FORM_RULES, 4);
+  const industry = matchControlled(evidence, STOCK_INDUSTRY_RULES, 2);
+  return { id, name, fans, fansTier, sLevel, lLevel, deliveries, consumption, persona, forms, industry, category, raw };
 }
 
 // 按昵称搜索达人
@@ -381,6 +543,7 @@ function scoreAuthor(auth) {
     `星川${auth.sLevel || '未分级'}(${sScore}分) · 星图消耗${fmtWan(auth.consumption)}(${cScore}分) · ` +
     `交付${auth.deliveries}个项目(${dScore}分) · 电商${auth.lLevel || '—'}(${lScore}分)` +
     (auth.fansTier ? ` · ${auth.fansTier}` : '') +
+    (auth.industry && auth.industry.length ? ` · 行业${auth.industry.join('/')}` : '') +
     (auth.category ? ` · 类目${auth.category}` : '');
   return { score, tier, medal, tags, reason };
 }
@@ -431,18 +594,63 @@ function startServer() {
   // 健康检查 / 登录状态
   app.get('/health', async (_req, res) => {
     let loggedIn = false;
-    try { if (_page) loggedIn = await checkLoggedIn(_page); } catch (_) {}
-    res.json({ ok: true, loggedIn, version: '1.0.0', port: PORT });
+    try {
+      if (_page) loggedIn = await checkLoggedIn(_page);
+      else if (!_loginPending) ensureBrowser().catch(() => {}); // 尚未启动则后台预热（扫码等待中不抢占）
+    } catch (_) {}
+    const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
+    res.json({
+      ok: true, loggedIn, version: '3.0.0', port: PORT,
+      loginUrl: SQUARE_URL,
+      cookiesFile: '.xc-cookies.json',
+      cookieCount,
+      loginPending: _loginPending,
+      loginNote: loggedIn ? '' :
+        '请点工作台「🚀 登录星图」按钮，本机会弹出 Chrome 窗口，在窗口里完成星图扫码登录，' +
+        '窗口会自动关闭（登录态保存在本机，仅需一次）。',
+    });
   });
 
-  // 主动唤起浏览器登录
-  app.post('/login', async (_req, res) => {
+  // 弹窗扫码登录：POST /login
+  // - 已有有效登录态 → 直接返回；
+  // - 否则启动【有界面】Chromium 窗口，每 2 秒检测一次，最多等 180 秒；
+  // - 前端取消（请求中断）/ 窗口被手动关闭 / 超时，都会中止并返回提示。
+  app.post('/login', async (req, res) => {
+    if (_loginPending) {
+      return res.status(409).json({ ok: false, pending: true, error: '已有登录窗口在等待扫码，请在弹出的 Chrome 窗口里完成登录' });
+    }
+    let aborted = false;
+    req.on('close', () => { aborted = true; }); // 前端点「取消」或离开页面
     try {
-      const page = await ensureBrowser();
-      await page.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-      res.json({ ok: true, loggedIn: await checkLoggedIn(page), message: '已打开星图达人广场，请在弹出的 Chrome 窗口中扫码/登录' });
+      // 1) 先用现有 Cookie 快速验证一次，已登录就不弹窗
+      try {
+        const page = await ensureBrowser();
+        if (await checkLoggedIn(page)) {
+          return res.json({ ok: true, loggedIn: true, message: '已登录，无需重复操作' });
+        }
+      } catch (_) { /* 无头浏览器异常也继续走弹窗登录 */ }
+      // 2) 弹出有界面窗口等扫码
+      _loginPending = true;
+      const r = await headedLogin({ get aborted() { return aborted; } });
+      if (r.ok) {
+        // 登录成功：重置无头浏览器，下次打标用新 Cookie 启动
+        if (_browser) { try { await _browser.close(); } catch (_) {} }
+        _browser = null; _page = null; _launching = null;
+      }
+      res.json({
+        ok: !!r.ok, loggedIn: !!r.loggedIn, pending: false,
+        message: r.message || (r.ok ? '登录成功' : '登录失败，请重试'),
+      });
     } catch (e) {
-      res.status(500).json({ ok: false, error: friendlyErr(e) });
+      const raw = friendlyErr(e).split('Browser logs')[0].trim();
+      res.status(500).json({
+        ok: false,
+        error: '登录窗口启动失败：' + raw +
+          '。请确认电脑有图形桌面环境（不能在远程服务器/无桌面环境运行）；' +
+          '若浏览器被安全软件拦截，请放行后重试。',
+      });
+    } finally {
+      _loginPending = false;
     }
   });
 
@@ -469,7 +677,7 @@ function startServer() {
       const page = await ensureBrowser();
       const loggedIn = await checkLoggedIn(page);
       if (!loggedIn) {
-        return res.status(401).json({ ok: false, loggedIn: false, error: '星图未登录，请在弹出的 Chrome 窗口完成扫码登录后重试' });
+        return res.status(401).json({ ok: false, loggedIn: false, error: '星图未登录：请点工作台「🚀 登录星图」按钮，在弹出的 Chrome 窗口里扫码登录后再开始打标' });
       }
 
       const results = [];
@@ -502,7 +710,8 @@ function startServer() {
           sLevel: auth.sLevel, lLevel: auth.lLevel,
           deliveries: auth.deliveries, consumption: auth.consumption,
           fans: auth.fans, fansTier: auth.fansTier || '',
-          persona: auth.persona || [], forms: auth.forms || [], category: auth.category || '',
+          persona: auth.persona || [], forms: auth.forms || [], industry: auth.industry || [],
+          category: auth.category || '',
           tags: sc.tags, reason: sc.reason,
         });
       }
@@ -518,16 +727,21 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.0.0');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
-    console.log('  网页检测到连接后即可上传名单、一键打标。');
+    console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
-    console.log('  正在打开浏览器准备星图登录…（首次请扫码登录）');
+    console.log('  使用 3 步：');
+    console.log('   1) 保持本窗口打开（打标时浏览器在后台无头运行，不弹窗）；');
+    console.log('   2) 在工作台网页点「🚀 登录星图」，本机弹出 Chrome 窗口，');
+    console.log('      扫码登录后窗口自动关闭（登录态保存在本机，仅需一次）；');
+    console.log('   3) 上传达人名单 Excel，点「开始打标」等待结果。');
     console.log('==================================================\n');
     ensureBrowser().then(async (page) => {
       const in_ = await checkLoggedIn(page);
-      console.log(in_ ? '✅ 检测到星图已登录，可直接使用。\n' : '⚠️  未检测到登录，请在弹出的 Chrome 窗口扫码登录星图。\n');
-    }).catch(e => console.log('⚠️  浏览器启动失败：' + friendlyErr(e) + '\n   若提示缺少浏览器，请运行：npx playwright install chromium\n   若提示 "has been closed"，请确认 xc-tagger 文件夹路径不含空格/括号（建议 ~/xc-tagger 或 C:\\xc-tagger）。\n'));
+      console.log(in_ ? '✅ 检测到星图登录态有效（.xc-cookies.json），可直接使用。\n'
+        : '⚠️  尚未登录：请到工作台网页点「🚀 登录星图」扫码（弹窗约 3 分钟内有效）。\n');
+    }).catch(e => console.log('⚠️  后台浏览器启动失败：' + friendlyErr(e) + '\n   登录时会自动重试；若提示缺少浏览器，请运行：npx playwright install chromium\n'));
   });
 }
 
