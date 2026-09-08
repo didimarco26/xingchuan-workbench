@@ -178,7 +178,19 @@ function pick(obj, patterns) {
 }
 function normText(v) { return String(v == null ? '' : v).trim(); }
 
-// 把星图原始达人对象映射为打标所需指标
+// 粉丝量级档位（与存量/星川达人库「万粉标签」口径一致）
+function fansTierOf(fans) {
+  fans = Number(fans) || 0;
+  if (fans >= 10000000) return '千万粉';
+  if (fans >= 1000000) return '百万粉';
+  if (fans >= 500000) return '50-100万粉';
+  if (fans >= 100000) return '10-50万粉';
+  if (fans >= 10000) return '1-10万粉';
+  if (fans > 0) return '万粉以下';
+  return '';
+}
+
+// 把星图原始达人对象映射为打标所需指标（字段名按存量达人库口径对齐）
 function mapAuthor(raw) {
   const blob = JSON.stringify(raw);
   // ID
@@ -188,6 +200,7 @@ function mapAuthor(raw) {
   const name = normText(pick(raw, [/nick_?name/i, /author_?name/i, /^name$/i]));
   // 粉丝
   const fans = Number(pick(raw, [/fans_?count/i, /follower/i, /^fans$/i, /fans_num/i])) || 0;
+  const fansTier = fansTierOf(fans);
   // 星川等级 S0-S5：优先取形如 S5 的字段值
   let sLevel = '';
   const sMatch = blob.match(/"[^"]*(?:xc|xinchuan|星川|star_?level|s_?level)[^"]*"\s*:\s*"?(S[0-5])"?/i);
@@ -201,7 +214,14 @@ function mapAuthor(raw) {
   const deliveries = Number(pick(raw, [/project_?count/i, /item_?count/i, /cooperate_?count/i, /合作_?数|项目_?数|接单/i, /deliver/i, /trade_?count/i, /order_?count/i])) || 0;
   // 星图消耗（元）
   const consumption = Number(pick(raw, [/consume|consumption|spend|星图_?消耗|消耗|gmv|amount|cost/i])) || 0;
-  return { id, name, fans, sLevel, lLevel, deliveries, consumption, raw };
+  // —— 存量达人库标签字段（尽力提取；星图接口返回则带出，无则留空，不臆造）——
+  // 达人人设标签（如：测评/剧情/种草/知识…）
+  const persona = normText(pick(raw, [/persona|人设|标签|tag|label/i])).split(/[、,，/|]/).map(s => s.trim()).filter(Boolean).slice(0, 5);
+  // 内容形式标签（短视频/直播/图文…）
+  const forms = normText(pick(raw, [/content_?type|内容_?形式|形式|video_?type|material/i])).split(/[、,，/|]/).map(s => s.trim()).filter(Boolean).slice(0, 5);
+  // 主要带货类目 / 行业
+  const category = normText(pick(raw, [/category|cate|类目|行业|industry|vertical/i])).slice(0, 60);
+  return { id, name, fans, fansTier, sLevel, lLevel, deliveries, consumption, persona, forms, category, raw };
 }
 
 // 按昵称搜索达人
@@ -252,7 +272,7 @@ async function getByIds(page, ids) {
   return result;
 }
 
-// 对单个达人打标
+// 对单个达人打标（输出字段与存量达人库口径对齐）
 function scoreAuthor(auth) {
   const sScore = S_LEVEL_SCORE[auth.sLevel] != null ? S_LEVEL_SCORE[auth.sLevel] : 0;
   const dScore = scoreDeliveries(auth.deliveries);
@@ -260,16 +280,22 @@ function scoreAuthor(auth) {
   const lScore = scoreEcomLevel(auth.lLevel);
   const score = Math.round((sScore + dScore + cScore + lScore) * 10) / 10;
   const { tier, medal } = tierOf(score);
+  // 标签：星川等级 + 粉丝量级 + 消耗档 + 电商等级 + 交付经验 + 人设/内容形式（存量库标签风格）
   const tags = [];
   if (auth.sLevel) tags.push(auth.sLevel + ' 星川');
+  if (auth.fansTier) tags.push(auth.fansTier);
   if (auth.consumption > 100000) tags.push('高星图消耗');
   else if (auth.consumption > 10000) tags.push('中星图消耗');
   if (auth.lLevel && /L[3-5]/.test(auth.lLevel)) tags.push(auth.lLevel + ' 电商');
   if (auth.deliveries > 50) tags.push('交付经验丰富');
+  (auth.persona || []).slice(0, 2).forEach(t => { if (t && t.length <= 12 && !tags.includes(t)) tags.push(t); });
+  (auth.forms || []).slice(0, 1).forEach(t => { if (t && t.length <= 8 && !tags.includes(t)) tags.push(t); });
   if (!tags.length) tags.push('待培育');
   const reason =
     `星川${auth.sLevel || '未分级'}(${sScore}分) · 星图消耗${fmtWan(auth.consumption)}(${cScore}分) · ` +
-    `交付${auth.deliveries}个项目(${dScore}分) · 电商${auth.lLevel || '—'}(${lScore}分)`;
+    `交付${auth.deliveries}个项目(${dScore}分) · 电商${auth.lLevel || '—'}(${lScore}分)` +
+    (auth.fansTier ? ` · ${auth.fansTier}` : '') +
+    (auth.category ? ` · 类目${auth.category}` : '');
   return { score, tier, medal, tags, reason };
 }
 
@@ -388,7 +414,9 @@ function startServer() {
           score: sc.score, tier: sc.tier, medal: sc.medal,
           sLevel: auth.sLevel, lLevel: auth.lLevel,
           deliveries: auth.deliveries, consumption: auth.consumption,
-          fans: auth.fans, tags: sc.tags, reason: sc.reason,
+          fans: auth.fans, fansTier: auth.fansTier || '',
+          persona: auth.persona || [], forms: auth.forms || [], category: auth.category || '',
+          tags: sc.tags, reason: sc.reason,
         });
       }
       // 按分降序
