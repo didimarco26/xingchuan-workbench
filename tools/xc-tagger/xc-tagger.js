@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.5
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.6
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，它会：
  *   1) 在 127.0.0.1:7842 起一个本地 HTTP 服务（只监听本机，不对外）；
@@ -13,13 +13,16 @@
  *      扫码/账号密码/验证码均可；成功后写 Cookie 备份、CDP 模式自动关闭窗口，
  *      /health 内存登录位即时生效。超时 5 分钟。
  *   4) 打标：POST /tag 时后台自动重开浏览器（同一配置目录免登录）：
- *      · 星图 API 批量取结构化数据（星川等级 S0-S5 / 交付项目数 / 星图消耗 /
- *        电商等级 / 粉丝量 / 人设·内容形式·行业受控词标签）；
- *      · ★ v3.5 新增：逐个进入达人主页（/ad/creator/detail/{id}），拦截
- *        视频列表 XHR（失败降级 DOM 解析「创作能力」区），抓【前三个视频】
- *        的标题/播放/点赞/内容形式，输出 videoAnalysis；视频标题反哺
- *        forms/persona/industry 标签（只补充不覆盖）；XC_TAGGER_DEBUG=1 时
- *        落截图+接口 JSON 到 .xc-debug/ 供真机校准；每达人间隔 800ms 防风控。
+ *      · ★ v3.6 主链路改为「ID 直进达人主页」：直接用名单里的达人 ID 访问
+ *        /ad/creator/detail/{id}，拦截主页 XHR/fetch 响应（拦截不到则降级
+ *        解析 DOM），一次拿到达人资料（星川等级 S0-S5 / 交付项目数 /
+ *        星图消耗 / 电商等级 / 粉丝数 / 内容主题标签）与【前三个视频】的
+ *        标题/播放/点赞/内容形式，输出 videoAnalysis；视频标题反哺
+ *        forms/persona/industry 标签（只补充不覆盖）；
+ *      · 主页打不开（ID 无效 / 达人未入驻星图 / 被重定向）才降级用昵称调
+ *        达人广场搜索接口兜底；两条路都失败才报「未检索到」；
+ *      · XC_TAGGER_DEBUG=1 时落截图+接口 JSON+DOM 状态到 .xc-debug/
+ *        供真机校准；每达人间隔 800ms 防风控。
  *   5) 评分双库口径：
  *      · 存量库（名单「来源」列=存量/库存/已合作，stock）：80 分制四项
  *        （星川等级30/交付20/星图消耗20/电商10），与 tblUXi2raUVtv3et 对齐；
@@ -985,30 +988,8 @@ async function searchByName(page, kw) {
   return null;
 }
 
-// 按 ID 批量取达人信息（50 个/批）
-async function getByIds(page, ids) {
-  const result = new Map();
-  const payloads = [
-    { author_ids: ids },
-    { star_author_ids: ids },
-    { author_id_list: ids },
-    { ids },
-  ];
-  for (const body of payloads) {
-    try {
-      const r = await xgFetch(page, '/gw/api/aggregator/multi_get_author_info', body);
-      if (DEBUG_DUMP) fs.writeFileSync(path.join(__dirname, `debug_ids_${Date.now()}.json`), JSON.stringify(r.json, null, 2));
-      const authors = [];
-      deepCollectAuthors(r.json, authors, 0);
-      for (const a of authors.map(mapAuthor).filter(x => x.id || x.name)) {
-        const key = a.id || a.name;
-        if (key && !result.has(key)) result.set(key, a);
-      }
-      if (result.size) return result;
-    } catch (_) { /* 试下一种 payload */ }
-  }
-  return result;
-}
+// v3.6：打标主链路不再走批量资料接口——直接用达人 ID 进创作者主页抓取
+// （fetchCreatorHome，XHR 拦截 + DOM 降级），昵称搜索仅在主页打不开时兜底。
 
 // 对单个达人打标（输出字段与存量达人库口径对齐）
 function scoreAuthor(auth, opts = {}) {
@@ -1142,14 +1123,178 @@ function domVideoCardsEval() {
 }
 
 /**
- * v3.5：访问达人详情页，抓前三个视频信息。
- * 优先拦截 XHR/fetch 响应（含视频列表/作品/详情的接口）→ 宽松挖 JSON；
- * 拦截不到则降级解析「创作能力」区域 DOM 卡片。
- * 任何失败（404/权限/结构变化）都返回 []，不阻塞打标。
- * debug=true（XC_TAGGER_DEBUG=1）时落截图 + 原始接口 JSON 到 .xc-debug/ 供真机校准。
+ * v3.6：浏览器侧——读取达人主页状态与 DOM 资料（纯浏览器 JS，不引用 Node 侧变量）。
+ * 返回：{ url, onDetail, notFound, headText, chips, name }
+ *  - onDetail：最终 URL 仍停在 /ad/creator/detail/{数字}（被重定向到广场/SSO 则 false）
+ *  - notFound：正文含「达人不存在/未入驻/404」等失效文案
+ *  - headText：正文前 3000 字（Node 侧正则提取粉丝/等级/项目/消耗）
+ *  - chips：页面上可见的短标签（内容主题/类目），过滤数字与操作按钮
+ *  - name：尽力从昵称语义节点/h1/h2 取达人昵称
  */
-async function fetchCreatorVideos(page, authorId, { debug = false } = {}) {
-  if (!authorId) return [];
+function domHomeStateEval() {
+  const out = { url: '', onDetail: false, notFound: false, headText: '', chips: [], name: '' };
+  try {
+    out.url = location.href;
+    out.onDetail = /\/ad\/creator\/detail\/\d+/.test(out.url);
+    const text = (document.body && document.body.innerText || '').replace(/\s+/g, ' ').trim();
+    out.headText = text.slice(0, 3000);
+    out.notFound = /达人不存在|创作者不存在|达人已注销|账号已注销|页面不存在|找不到相关|未入驻|暂无权限|没有权限|内容不存在|\b404\b/.test(text.slice(0, 1000));
+    // 昵称：优先语义化 class，再退 h1/h2；过滤导航/操作文案与纯数字
+    const nameSels = [
+      '[class*="nickname" i]', '[class*="nick-name" i]', '[class*="userName" i]',
+      '[class*="user-name" i]', '[class*="authorName" i]', '[class*="author-name" i]',
+      'h1', 'h2',
+    ];
+    for (const s of nameSels) {
+      let el = null;
+      try { el = document.querySelector(s); } catch (_) { continue; }
+      if (!el) continue;
+      const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+      if (t && t.length >= 2 && t.length <= 30 && !/^\d+$/.test(t) &&
+          !/登录|注册|搜索|首页|广场|收藏|分享|评论|私信|关注|粉丝|获赞/.test(t)) {
+        out.name = t;
+        break;
+      }
+    }
+    // 内容主题/类目标签 chips
+    const seen = new Set();
+    const chipSels = ['[class*="tag" i]', '[class*="label" i]', '[class*="chip" i]', '[class*="topic" i]'];
+    for (const s of chipSels) {
+      let els = [];
+      try { els = Array.from(document.querySelectorAll(s)); } catch (_) { continue; }
+      for (const el of els) {
+        try {
+          if (el.offsetParent === null) continue; // 不可见
+          const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+          if (!t || t.length < 2 || t.length > 12) continue;
+          if (/粉丝|关注|获赞|点赞|播放|登录|注册|收藏|分享|评论|私信|下单|预约|合作|咨询|客服|首页|广场|\d|￥|¥/.test(t)) continue;
+          if (seen.has(t)) continue;
+          seen.add(t);
+          out.chips.push(t);
+          if (out.chips.length >= 40) break;
+        } catch (_) { /* skip */ }
+      }
+      if (out.chips.length >= 40) break;
+    }
+  } catch (_) { /* 页面异常时返回空状态，调用方按打不开处理 */ }
+  return out;
+}
+
+// v3.6：Node 侧——从主页 DOM 状态正则提取达人资料（字段名待真机校准，宽松匹配）
+function parseDomProfile(state, authorId) {
+  if (!state || !state.onDetail || state.notFound) return null;
+  const text = String(state.headText || '');
+  if (text.length < 20) return null;
+  // 粉丝数：125.6万粉丝 / 1.2亿粉丝 / 8632粉丝
+  let fans = 0;
+  let m = text.match(/([\d.]+)\s*([亿万wW]?)\s*粉丝(?:数|量)?/);
+  if (m) fans = parseMediaCount(m[1] + (m[2] || ''));
+  // 星川等级 S0-S5：优先「星川…S4」语境，兜底独立 S 等级徽标
+  let sLevel = '';
+  m = text.match(/星川[\s\S]{0,12}?(S[0-5])(?![0-9])/i);
+  if (m) sLevel = m[1].toUpperCase();
+  if (!sLevel) { m = text.match(/(?:^|[^A-Za-z0-9])(S[0-5])(?![0-9])/); if (m) sLevel = m[1].toUpperCase(); }
+  // 电商等级 L0-L5
+  let lLevel = '';
+  m = text.match(/电商[\s\S]{0,12}?(L[0-5])(?![0-9])/i);
+  if (m) lLevel = m[1].toUpperCase();
+  if (!lLevel) { m = text.match(/(?:^|[^A-Za-z0-9])(L[0-5])(?![0-9])/); if (m) lLevel = m[1].toUpperCase(); }
+  // 交付/合作项目数
+  let deliveries = 0;
+  m = text.match(/(?:合作项目|交付项目|项目数|累计合作|累计交付|接单|完成项目|合作过)[^0-9]{0,8}(\d+(?:\.\d+)?)/);
+  if (m) deliveries = parseInt(m[1], 10) || 0;
+  if (!deliveries) {
+    m = text.match(/(\d+(?:\.\d+)?)\s*个?\s*(?:合作项目|交付项目|个项目|项目数|条合作)/);
+    if (m) deliveries = parseInt(m[1], 10) || 0;
+  }
+  // 星图消耗（元）：页面常显示「125.3万」「1.2亿」
+  let consumption = 0;
+  m = text.match(/(?:星图|累计)?消耗[^0-9]{0,8}(\d+(?:\.\d+)?)\s*([亿万wW]?)\s*(?:元)?/);
+  if (m) consumption = parseMediaCount(m[1] + (m[2] || ''));
+  // 内容主题标签：chips 优先（短标签信号最强），正文补充；映射到存量库受控词
+  const chips = Array.isArray(state.chips) ? state.chips : [];
+  const evidence = chips.join(' ') + ' ' + text.slice(0, 1200);
+  const persona = matchControlled(evidence, STOCK_PERSONA_RULES, 2);
+  const forms = matchControlled(evidence, STOCK_FORM_RULES, 2);
+  const industry = matchControlled(evidence, STOCK_INDUSTRY_RULES, 1);
+  const name = normText(state.name).slice(0, 40);
+  const hasSignal = fans > 0 || !!sLevel || deliveries > 0 || consumption > 0 || chips.length >= 3;
+  if (!hasSignal) return null;
+  return {
+    id: String(authorId || ''),
+    name,
+    fans,
+    fansTier: fansTierOf(fans),
+    sLevel, lLevel, deliveries, consumption,
+    persona, forms, industry,
+    category: chips[0] ? String(chips[0]).slice(0, 20) : '',
+    raw: { _dom: true, chips: chips.slice(0, 20), headText: text.slice(0, 500) },
+  };
+}
+
+// v3.6：主页 XHR 可能挖到多个达人对象（含登录账号自身/推荐位），按 ID 精确匹配优先、
+// 资料完整度兜底，避免把广告主账号或推荐达人误当目标。
+function authorFullness(a) {
+  let n = 0;
+  if (a.sLevel) n += 4;
+  if (a.deliveries > 0) n += 3;
+  if (a.consumption > 0) n += 3;
+  if (a.fans > 0) n += 2;
+  if (a.name) n += 1;
+  if ((a.persona || []).length || (a.forms || []).length) n += 1;
+  return n;
+}
+function pickHomeAuthor(rawAuthors, authorId) {
+  const mapped = (Array.isArray(rawAuthors) ? rawAuthors : [])
+    .map(mapAuthor).filter(a => a && (a.id || a.name));
+  if (!mapped.length) return null;
+  const idStr = String(authorId || '');
+  if (idStr) {
+    const exact = mapped.find(a => String(a.id) === idStr);
+    if (exact) return exact;
+    const loose = mapped.find(a => a.id &&
+      (String(a.id).includes(idStr) || idStr.includes(String(a.id))));
+    if (loose) return loose;
+  }
+  const ranked = mapped.slice().sort((x, y) => authorFullness(y) - authorFullness(x));
+  return authorFullness(ranked[0]) >= 3 ? ranked[0] : null;
+}
+
+// v3.6：合并两份达人资料——base 优先（搜索接口字段通常更全），extra 只补空字段；
+// 标签类列表取并集。用于「昵称搜索命中 + 主页补充资料/视频」场景。
+function mergeAuth(base, extra) {
+  if (!extra) return base;
+  const out = Object.assign({}, base);
+  const union = (a, b) => Array.from(new Set([...(a || []), ...(b || [])]));
+  if (!out.name && extra.name) out.name = extra.name;
+  if (!out.sLevel && extra.sLevel) out.sLevel = extra.sLevel;
+  if (!out.lLevel && extra.lLevel) out.lLevel = extra.lLevel;
+  if ((!out.fans || out.fans === 0) && extra.fans) out.fans = extra.fans;
+  if ((!out.deliveries || out.deliveries === 0) && extra.deliveries) out.deliveries = extra.deliveries;
+  if ((!out.consumption || out.consumption === 0) && extra.consumption) out.consumption = extra.consumption;
+  if (!out.category && extra.category) out.category = extra.category;
+  out.fansTier = fansTierOf(out.fans || 0);
+  out.persona = union(base.persona, extra.persona);
+  out.forms = union(base.forms, extra.forms);
+  out.industry = union(base.industry, extra.industry);
+  out.raw = extra.raw || base.raw;
+  return out;
+}
+
+/**
+ * v3.6 打标主链路：直接用达人 ID 进入星图创作者主页
+ * （https://www.xingtu.cn/ad/creator/detail/{id}），一次访问同时拿到：
+ *   ① 达人资料：星川等级 / 交付项目数 / 星图消耗 / 电商等级 / 粉丝数 / 内容主题标签
+ *      ——优先拦截主页 XHR/fetch 响应挖达人对象（ID 精确匹配），拦截不到则
+ *        降级解析主页 DOM（头部文本正则 + 标签 chips）；
+ *   ② 前三个视频：标题 / 播放 / 点赞 / 内容形式 / 带货信号（XHR 优先、DOM 降级）。
+ * 主页打不开（ID 无效 / 未入驻 / 被重定向到广场或 SSO / 无任何资料信号）→
+ * 返回 { ok:false }，调用方降级走昵称搜索，绝不阻塞打标。
+ * debug=true（XC_TAGGER_DEBUG=1）时落截图 + 接口 JSON + DOM 状态到 .xc-debug/。
+ */
+async function fetchCreatorHome(page, authorId, { debug = false } = {}) {
+  const fail = (reason) => ({ ok: false, auth: null, videos: [], via: '', reason });
+  if (!authorId) return fail('no-id');
   const ctx = page.context ? page.context() : page;
   let vp = null;
   const apiHits = [];
@@ -1163,18 +1308,18 @@ async function fetchCreatorVideos(page, authorId, { debug = false } = {}) {
         if (!/xingtu\.cn|oceanengine\.com/i.test(u)) return;
         const rt = resp.request().resourceType();
         if (rt !== 'xhr' && rt !== 'fetch') return;
-        if (!/video|aweme|work|post|creator|author|content|detail|feed/i.test(u)) return;
+        if (!/video|aweme|work|post|creator|author|content|detail|feed|user|info|stat|profile|tag|label|portrait/i.test(u)) return;
         const j = await resp.json();
         apiHits.push({ url: u, json: j });
       } catch (_) { /* 非 JSON */ }
     });
     await vp.goto(CREATOR_DETAIL_URL(authorId), { waitUntil: 'domcontentloaded', timeout: 30000 });
-    // 等视频列表接口（9s 内命中即继续，否则走 DOM 降级）
+    // 等主页资料/视频列表接口（9s 内命中即继续，否则走 DOM 降级）
     await vp.waitForResponse((r) => {
       try {
         const rt = r.request().resourceType();
         if (rt !== 'xhr' && rt !== 'fetch') return false;
-        return /video|aweme|work|post|feed|creator.*(detail|home|info)|author.*(video|work|post)/i.test(r.url());
+        return /video|aweme|work|post|feed|creator|author|user.*info|detail|portrait|stat/i.test(r.url());
       } catch (_) { return false; }
     }, { timeout: 9000 }).catch(() => {});
     await vp.waitForTimeout(2000);
@@ -1190,7 +1335,37 @@ async function fetchCreatorVideos(page, authorId, { debug = false } = {}) {
     }).catch(() => {});
     await vp.waitForTimeout(2500);
 
-    // 1) 接口 JSON 挖视频
+    // ---- 主页状态：重定向/未入驻 判定 + DOM 资料 ----
+    const domState = await vp.evaluate(domHomeStateEval).catch(() => null);
+    const stateKnown = !!domState;
+    const onDetail = !!(domState && domState.onDetail);
+    const notFound = !!(domState && domState.notFound);
+    if (debug) {
+      try {
+        fs.mkdirSync(dbgDir, { recursive: true });
+        const ts = Date.now();
+        await vp.screenshot({ path: path.join(dbgDir, `creator_${authorId}_${ts}.png`), fullPage: false }).catch(() => {});
+        fs.writeFileSync(path.join(dbgDir, `creator_${authorId}_${ts}.json`),
+          JSON.stringify({ domState, apiHits: apiHits.map((h) => ({ url: h.url, json: h.json })) }).slice(0, 3000000), 'utf8');
+      } catch (_) {}
+    }
+    // 被重定向（无效 ID/未登录跳广场或 SSO）或页面明示不存在 → 主页失败，交调用方兜底
+    if (stateKnown && (!onDetail || notFound)) return fail(notFound ? 'notfound' : 'redirect');
+
+    // ---- ① 资料：XHR 挖达人对象（ID 精确匹配优先）----
+    const rawAuthors = [];
+    for (const h of apiHits) deepCollectAuthors(h.json, rawAuthors, 0);
+    let auth = pickHomeAuthor(rawAuthors, authorId);
+    let via = auth ? 'xhr' : '';
+    // ---- ①b 资料：DOM 降级 / 补全 ----
+    const domAuth = parseDomProfile(domState, authorId);
+    if (domAuth) {
+      auth = auth ? mergeAuth(auth, domAuth) : domAuth;
+      if (!via) via = 'dom';
+    }
+    if (!auth) return fail(stateKnown ? 'no-data' : 'error');
+
+    // ---- ② 视频：XHR 挖 ----
     let vids = [];
     for (const h of apiHits) deepCollectVideos(h.json, vids, 0);
     const seen = new Set();
@@ -1199,8 +1374,7 @@ async function fetchCreatorVideos(page, authorId, { debug = false } = {}) {
       if (!key || seen.has(key)) return false;
       seen.add(key); return true;
     });
-
-    // 2) DOM 降级
+    // ---- ②b 视频：DOM 降级 ----
     if (vids.length === 0) {
       const cards = await vp.evaluate(domVideoCardsEval).catch(() => []);
       vids = cards.map((c) => {
@@ -1216,8 +1390,7 @@ async function fetchCreatorVideos(page, authorId, { debug = false } = {}) {
         };
       }).filter((v) => v.title && v.title.length >= 4).slice(0, 3);
     }
-
-    vids = vids.slice(0, 3).map((v) => ({
+    const videos = vids.slice(0, 3).map((v) => ({
       title: v.title,
       plays: v.plays || 0,
       likes: v.likes || 0,
@@ -1225,19 +1398,11 @@ async function fetchCreatorVideos(page, authorId, { debug = false } = {}) {
       isSelling: videoIsSelling(v),
     }));
 
-    if (debug) {
-      try {
-        fs.mkdirSync(dbgDir, { recursive: true });
-        const ts = Date.now();
-        await vp.screenshot({ path: path.join(dbgDir, `creator_${authorId}_${ts}.png`), fullPage: false }).catch(() => {});
-        fs.writeFileSync(path.join(dbgDir, `creator_${authorId}_${ts}.json`),
-          JSON.stringify(apiHits.map((h) => ({ url: h.url, json: h.json }))).slice(0, 3000000), 'utf8');
-      } catch (_) {}
-    }
-    return vids;
+    if (debug) console.log(`  🐞 主页抓取(${authorId})：资料来源=${via}，视频=${videos.length}个`);
+    return { ok: true, auth, videos, via, reason: 'ok' };
   } catch (e) {
-    if (debug) console.log('  ⚠️ 视频抓取失败(' + authorId + ')：' + friendlyErr(e));
-    return [];
+    if (debug) console.log('  ⚠️ 达人主页访问失败(' + authorId + ')：' + friendlyErr(e));
+    return fail('error');
   } finally {
     if (vp) await vp.close().catch(() => {});
   }
@@ -1356,7 +1521,7 @@ function startServer() {
     if (loggedIn) _loggedIn = true;
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.5.1', port: PORT,
+      ok: true, loggedIn, version: '3.6.0', port: PORT,
       loginUrl: SQUARE_URL,
       cookiesFile: '.xc-cookies.json',
       cookieCount,
@@ -1473,46 +1638,72 @@ function startServer() {
 
       const results = [];
       const debugVideo = process.env.XC_TAGGER_DEBUG === '1';
-      if (debugVideo) console.log('🐞 XC_TAGGER_DEBUG=1：视频抓取将落截图与接口 JSON 到 .xc-debug/');
-      // 1) 先按 ID 批量取（50/批）
-      const withId = items.filter(x => x.id);
-      const byName = items.filter(x => !x.id && x.name);
-      const idMap = new Map();
-      for (let i = 0; i < withId.length; i += 50) {
-        const batch = withId.slice(i, i + 50).map(x => String(x.id));
-        const got = await getByIds(page, batch);
-        for (const [k, v] of got) idMap.set(String(k), v);
-        await sleep(400);
-      }
-      // 2) 有 ID 但批量接口没取到的，以及只有昵称的，走搜索
+      if (debugVideo) console.log('🐞 XC_TAGGER_DEBUG=1：达人主页抓取将落截图、接口 JSON 与 DOM 状态到 .xc-debug/');
+      // v3.6 主链路：① 有 ID 直接进达人主页抓资料+视频；
+      //             ② 主页打不开（ID 无效/未入驻/重定向）才用昵称搜达人广场兜底；
+      //             ③ 两条路都失败才报「未检索到」。
+      const homeCache = new Map(); // authorId -> 主页抓取结果（避免同一 ID 重复访问）
+      const homeFor = async (id) => {
+        const key = String(id);
+        if (!homeCache.has(key)) {
+          let r;
+          try { r = await fetchCreatorHome(page, key, { debug: debugVideo }); }
+          catch (_) { r = { ok: false, auth: null, videos: [], via: '', reason: 'error' }; }
+          homeCache.set(key, r);
+          await sleep(800); // 防风控：达人主页访问间隔
+        }
+        return homeCache.get(key);
+      };
       for (const it of items) {
         let auth = null;
-        if (it.id && idMap.has(String(it.id))) auth = idMap.get(String(it.id));
+        let videoAnalysis = [];
+        let via = '';
+        // ① 主链路：用达人 ID 直进星图主页
+        if (it.id) {
+          const home = await homeFor(it.id);
+          if (home && home.ok && home.auth) {
+            auth = home.auth;
+            videoAnalysis = home.videos || [];
+            via = 'home';
+          }
+        }
+        // ② 兜底：昵称搜索达人广场（主页打不开 / 名单只有昵称）
         if (!auth) {
           const kw = it.name || it.id;
-          if (kw) { try { auth = await searchByName(page, String(kw)); } catch (_) { auth = null; } await sleep(350); }
+          if (kw) {
+            let searched = null;
+            try { searched = await searchByName(page, String(kw)); } catch (_) { searched = null; }
+            await sleep(350);
+            if (searched) {
+              auth = searched;
+              via = 'search';
+              // 搜索命中后仍进一次主页：抓视频 + 用主页资料补空字段（同 ID 走缓存不重复访问）
+              if (searched.id) {
+                const home = await homeFor(searched.id);
+                if (home) {
+                  videoAnalysis = home.videos || [];
+                  if (home.auth) auth = mergeAuth(searched, home.auth);
+                }
+              }
+            }
+          }
         }
+        // ③ 两条路都失败
         if (!auth) {
           results.push({
             id: it.id || '', name: it.name || '(未命名)', found: false, score: 0, tier: '储备', medal: '⚪',
             sLevel: '', lLevel: '', deliveries: 0, consumption: 0, tags: ['未检索到'],
-            reason: '未在星图达人广场检索到，请核对昵称/ID 或该达人是否入驻星图',
+            reason: '未能通过 ID 进入主页，昵称搜索也未命中，请核实达人是否入驻星图',
             dataSource: 'new', videoBonus: 0, videoAnalysis: [],
           });
           continue;
         }
         // v3.5：双库口径（名单「来源」列：存量=stock/增量=increment；缺省按新达人 new）
         const dataSource = it.src === 'stock' || it.src === 'increment' ? it.src : 'new';
-        // v3.5：进达人主页抓前三个视频（XHR 拦截优先、DOM 降级；失败返回 [] 不阻塞）
-        let videoAnalysis = [];
-        if (auth.id) {
-          try {
-            videoAnalysis = await fetchCreatorVideos(page, String(auth.id), { debug: debugVideo });
-          } catch (_) { videoAnalysis = []; }
-          await sleep(800); // 防风控：达人主页访问间隔
-        }
         enrichAuthFromVideos(auth, videoAnalysis);
         const sc = scoreAuthor(auth, { dataSource, videoAnalysis });
+        const reason = sc.reason +
+          (via === 'home' ? '\n获取方式: ID直进达人主页' : '\n获取方式: 昵称搜索兜底');
         results.push({
           id: auth.id || it.id || '', name: auth.name || it.name || '', found: true,
           score: sc.score, tier: sc.tier, medal: sc.medal,
@@ -1521,8 +1712,9 @@ function startServer() {
           fans: auth.fans, fansTier: auth.fansTier || '',
           persona: auth.persona || [], forms: auth.forms || [], industry: auth.industry || [],
           category: auth.category || '',
-          tags: sc.tags, reason: sc.reason,
+          tags: sc.tags, reason,
           dataSource: sc.dataSource, videoBonus: sc.videoBonus, videoAnalysis,
+          via,
         });
       }
       // 按分降序
@@ -1537,7 +1729,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.5.1');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.6.0');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
@@ -1599,6 +1791,11 @@ module.exports = {
   deepCollectVideos,
   enrichAuthFromVideos,
   CREATOR_DETAIL_URL,
+  // v3.6
+  parseDomProfile,
+  pickHomeAuthor,
+  authorFullness,
+  mergeAuth,
 };
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
