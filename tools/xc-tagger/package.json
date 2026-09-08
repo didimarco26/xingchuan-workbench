@@ -1,0 +1,20 @@
+{
+  "name": "xc-tagger",
+  "version": "1.0.0",
+  "private": true,
+  "description": "星川服务商达人自助打标 · 本地一键工具（Playwright 复用本机已登录的星图 Cookie，抓取达人广场信息并按存量达人逻辑分层打标）",
+  "main": "xc-tagger.js",
+  "bin": {
+    "xc-tagger": "xc-tagger.js"
+  },
+  "scripts": {
+    "start": "node xc-tagger.js",
+    "setup": "playwright install chromium"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "playwright": "^1.49.1",
+    "xlsx": "^0.18.5"
+  }
+}
