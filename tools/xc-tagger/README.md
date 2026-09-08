@@ -25,22 +25,39 @@
 
 ---
 
-## 二、一键运行（推荐，需装 Node.js）
+## 二、一键启动（双击即可，推荐）
 
-1. **安装 Node.js 18+**：到 <https://nodejs.org> 下载 LTS 版本，一路下一步安装。
-2. 把本文件夹（`xc-tagger`，内含 `package.json`、`xc-tagger.js`）放到电脑任意位置。
-3. 在该文件夹里打开终端（Windows：在文件夹地址栏输入 `cmd` 回车；Mac：右键「服务→在文件夹位置打开终端」），执行：
+> **前提：电脑需安装 Node.js 18+**（只需装一次）：到 <https://nodejs.org> 下载 LTS 版本，一路下一步安装。
 
-   ```bash
-   npm install        # 首次运行，会自动装好 Playwright 的 Chromium 浏览器
-   node xc-tagger.js  # 启动工具
-   ```
-
-4. 首次启动会弹出 Chrome 并打开「巨量星图 · 达人广场」，**用手机扫码 / 验证码登录一次**即可（登录态保存在本文件夹，下次免登）。
-5. 保持这个黑窗口**不要关**，回到网页 `https://didimarco26.github.io/xingchuan-workbench/`，
+1. 下载对应的一键启动包并解压（解压工具用系统自带「归档实用工具 / 解压到当前文件夹」即可）：
+   - **Mac 电脑**：下载 `xc-tagger-mac-v1.zip`，解压后双击 **`启动星川打标工具.command`**；
+   - **Windows 电脑**：下载 `xc-tagger-win-v1.zip`，解压后双击 **`启动星川打标工具.bat`**。
+2. **首次启动会自动安装依赖**（含 Playwright Chromium 浏览器，约需几分钟），请保持网络畅通、不要关闭弹出的窗口。
+3. 首次启动会自动弹出 Chrome 并打开「巨量星图 · 达人广场」，**用手机扫码 / 验证码登录一次**即可（登录态保存在本文件夹，下次免登）。
+4. 看到窗口提示「✅ 检测到星图已登录，可直接使用」后，**保持窗口不要关**，
+   回到网页 `https://didimarco26.github.io/xingchuan-workbench/`，
    进入「🏷️ 服务商达人自助打标」板块，页面显示「✅ 本地工具已连接」后即可上传名单、开始打标。
 
-> 关闭工具：在黑窗口按 `Ctrl + C`。
+> **Mac 首次双击提示「无法打开，因为来自身份不明的开发者」**：右键点 `启动星川打标工具.command` →「打开」→ 弹窗里再点「打开」即可（只需一次）；
+> 或在「系统设置 → 隐私与安全性」里点「仍要打开」。
+>
+> **关闭工具**：直接关掉黑窗口，或在窗口内按 `Ctrl + C`。
+>
+> **通用包 `xc-tagger-v1.zip`**：不含双击启动脚本，适合习惯命令行的同学，按下文手动方式启动。
+
+<details>
+<summary>命令行手动启动（不想双击时可展开）</summary>
+
+1. 把本文件夹（`xc-tagger`，内含 `package.json`、`xc-tagger.js`）放到电脑任意位置。
+2. 在该文件夹里打开终端（Windows：在文件夹地址栏输入 `cmd` 回车；Mac：右键「服务→在文件夹位置打开终端」），执行：
+
+   ```bash
+   npm install                # 首次运行，装好依赖
+   npx playwright install chromium   # 首次运行，装好 Playwright 的 Chromium 浏览器
+   node xc-tagger.js          # 启动工具
+   ```
+
+</details>
 
 ---
 
