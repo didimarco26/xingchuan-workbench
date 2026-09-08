@@ -5,9 +5,11 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 echo ============================================
-echo   Xingchuan Tagger v3.1 (offline build)
-echo   Dependencies and Chromium are bundled -
-echo   no network install needed.
+echo   Xingchuan Tagger v3.2
+echo   Node dependencies are bundled - no
+echo   network install needed. Uses your system
+echo   Chrome / Edge for login (falls back to an
+echo   on-page QR code if the browser is blocked).
 echo ============================================
 echo.
 
@@ -21,26 +23,14 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-rem 2) Use the BUNDLED Playwright Chromium (never download at launch)
-set "PLAYWRIGHT_BROWSERS_PATH=%~dp0browsers-win"
-set PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-
-if not exist "%~dp0browsers-win\chromium-1148\chrome-win\chrome.exe" (
-    echo [ERROR] Bundled Chromium is missing:
-    echo         browsers-win\chromium-1148\chrome-win\chrome.exe
-    echo         Please re-download the complete Windows package
-    echo         and extract ALL files before running.
-    echo.
-    pause
-    exit /b 1
-)
-
-echo [OK] Bundled Chromium ready, no network install needed.
+echo [OK] Node.js found. Dependencies are bundled, no network install needed.
+echo [INFO] Login uses your system Chrome / Edge; if it is blocked by policy,
+echo        an on-page QR code is shown automatically (scan with Douyin app).
 echo.
 
-rem 3) Start the tool (stays in background; click "Login to Xingtu" on the web page to scan QR)
+rem 2) Start the tool (stays in background; click "Login to Xingtu" on the web page)
 echo ==================================================
-echo  Xingchuan Tagger is running v3.1 (local service).
+echo  Xingchuan Tagger is running v3.2 (local service).
 echo  Run from      : %~dp0
 echo  Local service : http://127.0.0.1:7842
 echo  Workbench page: https://didimarco26.github.io/xingchuan-workbench/
@@ -48,8 +38,9 @@ echo.
 echo  3 STEPS:
 echo    1. Keep this window open;
 echo    2. On the workbench page, click the "Login to Xingtu" button -
-echo       a Chrome window pops up, scan the QR code to log in,
-echo       the window closes automatically (one time only, no plugin needed);
+echo       a Chrome/Edge window opens for QR login; if your company
+echo       policy blocks pop-up windows, a QR code is shown right on
+echo       the web page instead (scan it with the Douyin phone app);
 echo    3. Upload your influencer Excel and click "Start Tagging".
 echo.
 echo  Keep this window open while using the tool.

@@ -1,28 +1,35 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.2
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，它会：
  *   1) 在 127.0.0.1:7842 起一个本地 HTTP 服务（只监听本机，不对外）；
- *   2) 登录（仅需一次）：网页点「🚀 登录星图」→ POST /login 启动一个【有界面
- *      headed Chromium 窗口】打开巨量星图达人广场，服务商在窗口里扫码/验证码
- *      登录；工具每 2 秒检测一次，检测到登录成功后把 Cookie 写入本机
- *      .xc-cookies.json 并自动关闭窗口（超时 180 秒；窗口被手动关闭/网页点
- *      「取消」都会中止本次登录）。
- *   3) 打标：POST /tag 仍以【无头 headless 模式】后台运行 Chromium（不弹窗），
- *      启动时自动加载 .xc-cookies.json；检测到有效会话时自动回写刷新 Cookie。
- *      headed 与 headless 是两个独立浏览器实例，登录态靠 .xc-cookies.json 传递。
- *   4) 网页（星川决策工作台·服务商 GitHub 版）调用本地接口：
- *        GET  /health   → 探测服务与登录状态（含 loginPending 扫码等待标志）
- *        POST /login    → 弹出 Chrome 窗口扫码登录，成功后自动关窗
- *        POST /parse    → 解析上传的 Excel/CSV 达人名单，提取 达人ID / 昵称
+ *   2) 浏览器方案：启动脚本（start-xc-tagger / xc-open-chrome）先用
+ *      【系统 Chrome/Edge】以远程调试端口启动一个独立浏览器实例：
+ *        --remote-debugging-port=9222 --user-data-dir=<工具目录>/.xc-chrome-profile
+ *      工具本身【绝不 launch 浏览器】，只用 connectOverCDP 附加到这个实例
+ *      （Windows 安全策略会立即关闭 Playwright 自己弹出的 Chromium 窗口，
+ *        exitCode=0；系统 Chrome 由启动脚本正常拉起，不受此限制）。
+ *   3) 登录（仅需一次）：网页点「🚀 登录星图」→ POST /login，工具在已连接的
+ *      Chrome 里打开巨量星图达人广场标签页，服务商在该窗口扫码/验证码登录；
+ *      工具每 2 秒检测一次，成功后 Cookie 写入 .xc-cookies.json 备份
+ *      （登录态主体保存在 .xc-chrome-profile 浏览器配置目录，长期免登录）。
+ *      浏览器窗口不自动关闭，由用户自行关闭；超时 180 秒 / 点「取消」中止。
+ *   4) 打标：POST /tag 复用同一条 CDP 连接，在同一个 Chrome 里开后台标签页
+ *      抓取（标签页可见，可看到工具在工作；关闭浏览器窗口即停止）。
+ *   5) 网页（星川决策工作台·服务商 GitHub 版）调用本地接口：
+ *        GET  /health   → 探测服务、CDP 连接与登录状态（含 loginPending）
+ *        POST /login    → 在 Chrome 中打开星图页并等待扫码登录
+ *        POST /parse    → 解析上传的 Excel/CSV 达人名单
  *        POST /tag      → 用星图登录态抓取达人信息并按存量逻辑分层打标
- *   Cookie 只留在服务商本机（.xc-cookies.json），不上传、不落库。
+ *   若 9222 端口连不上（Chrome 未用调试端口启动），/login 返回
+ *      needOpenChrome:true，提示用户双击包里的 xc-open-chrome 脚本补开。
+ *   Cookie 只留在服务商本机，不上传、不落库。
  *
- * 运行：
- *   1. npm install        （首次，会自动安装 Playwright Chromium）
- *   2. node xc-tagger.js  （后台无头运行；在网页里点「登录星图」弹窗扫码即可）
+ * 运行：解压后双击 start-xc-tagger.command(Mac) / start-xc-tagger.bat(Windows)
+ *      （脚本会自动打开调试 Chrome 并启动本服务；需已安装 Node.js 18+ 与
+ *        Google Chrome 或 Edge）。
  *
  * 安全：CORS 仅放行 didimarco26.github.io 与本机页面；服务只绑定 127.0.0.1。
  */
@@ -49,6 +56,11 @@ const COOKIES_FILE = path.resolve(__dirname, '.xc-cookies.json');
 // 巨量星图 · 达人广场（广告主侧）。抓取接口与该页同源(www.xingtu.cn)，注入 Cookie 后天然带登录态。
 const XINGTU_ORIGIN = 'https://www.xingtu.cn';
 const SQUARE_URL = 'https://www.xingtu.cn/ad/creator/square';
+// 巨量引擎统一登录直达页（role=1 客户侧）：未登录访问达人广场会被踢到此 SSO。
+// 直接导航到它可省去「营销首页→点登录→选客户角色」几步点击，真机/无头都更稳；
+// 登录成功后 SSO 自动回跳 redirect_uri（达人广场）。
+const LOGIN_URL = 'https://sso.oceanengine.com/xingtu/login?redirect_uri=' +
+  encodeURIComponent('/ad/creator/square') + '&role=1';
 // 固定一个常见桌面 UA，避免无头浏览器被星图风控识别
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const DEBUG_DUMP = process.env.XC_TAGGER_DEBUG === '1'; // 调试：把原始响应落盘
@@ -106,77 +118,377 @@ function fmtWan(yuan) {
   return yuan > 0 ? yuan + '元' : '0';
 }
 
-// ---- 浏览器（Playwright 持久化登录态）-------------------------------------
-let _browser = null;
-let _page = null;
-let _launching = null;
+// ---- 浏览器会话管理 ---------------------------------------------------------
+// 两级方案，自动降级，全程中文提示：
+//   ① CDP 模式（优先）：工具自动用【系统 Chrome/Edge】以远程调试端口启动一个
+//      独立实例（独立 user-data-dir，与用户日常浏览器互不干扰），再
+//      connectOverCDP 附加。浏览器真实可见，服务商在窗口里直接扫码登录。
+//      —— Windows 安全策略会立即关闭 Playwright 自己 launch 的 Chromium
+//         窗口（exitCode=0），但系统 Chrome 由本工具以普通进程方式拉起，不受影响。
+//   ② 无头扫码模式（兜底）：系统浏览器全部不可用 / 调试端口被企业策略禁用时，
+//      Playwright 以 headless 启动（优先系统 Chrome/Edge，再兜底内置 Chromium），
+//      工具截取星图登录页二维码，服务商在工作台网页上用手机抖音 App 扫码，
+//      无头会话完成登录。只要有网就能跑。
+const CDP_CANDIDATE_PORTS = [9222, 9223, 9224, 9225];
+// 调试浏览器的独立配置目录（与启动参数约定一致；路径允许含中文/空格）
+const CHROME_PROFILE_DIR = path.resolve(__dirname, '.xc-chrome-profile');
+
+let _session = null;          // { mode:'cdp'|'headless', browser, context, browserName, browserId, cdpPort, proc, _workPage }
+let _sessionAcquiring = null;
 
 /**
- * 获取 Playwright 自己管理的 Chromium 可执行路径。
- * playwright.chromium.executablePath() 在部分 Windows 机器上会返回系统 Edge 的路径
- * （Edge 被自动化控制后会主动退出，报 "Target page, context or browser has been closed"）。
- * 此函数尝试多种方式拿到真正的 Playwright Chromium，并做路径合法性校验。
+ * 探测本机可用浏览器（纯函数，按优先级返回【已存在】的候选列表，便于单测注入）。
+ * 优先级：系统 Chrome → Chrome Beta → Chrome Canary → Microsoft Edge → 其他 Chromium。
+ * @param {{platform?:string, env?:object, exists?:(p:string)=>boolean, which?:(n:string)=>?string}} opt
  */
-function getPlaywrightChromiumPath() {
-  // 方式1：通过 Playwright 内部 registry 查询真实下载路径（1.x 可用）
-  try {
-    const { registry } = require('playwright/lib/server/registry');
-    const executable = registry.findExecutable('chromium');
-    if (executable) {
-      const p = executable.executablePath('linux') || executable.executablePath();
-      if (p && fs.existsSync(p) && !/edge|microsoft/i.test(p)) return p;
+function browserCandidates(opt = {}) {
+  const platform = opt.platform || process.platform; // win32 | darwin | linux
+  const env = opt.env || process.env;
+  const exists = opt.exists || ((p) => { try { return !!p && fs.existsSync(p); } catch (_) { return false; } });
+  const out = [];
+  const pushFirst = (id, name, kind, paths) => {
+    for (const p of paths) { if (p && exists(p)) { out.push({ id, name, kind, exe: p }); return; } }
+  };
+  if (platform === 'win32') {
+    const pf = env.ProgramFiles || 'C:\\Program Files';
+    const pf86 = env['ProgramFiles(x86)'] || env.ProgramFilesX86 || 'C:\\Program Files (x86)';
+    const local = env.LOCALAPPDATA || '';
+    const win = (...a) => a.filter(Boolean).join('\\');
+    pushFirst('chrome', '系统 Google Chrome', 'chrome', [
+      win(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      win(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      win(local, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    ]);
+    pushFirst('chrome-beta', 'Google Chrome Beta', 'chrome', [
+      win(pf, 'Google', 'Chrome Beta', 'Application', 'chrome.exe'),
+      win(pf86, 'Google', 'Chrome Beta', 'Application', 'chrome.exe'),
+    ]);
+    pushFirst('chrome-canary', 'Google Chrome Canary', 'chrome', [
+      win(local, 'Google', 'Chrome SxS', 'Application', 'chrome.exe'),
+    ]);
+    pushFirst('edge', 'Microsoft Edge', 'edge', [
+      win(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      win(pf, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    ]);
+    pushFirst('chromium', 'Chromium', 'chromium', [
+      win(local, 'Chromium', 'Application', 'chrome.exe'),
+    ]);
+  } else if (platform === 'darwin') {
+    const home = env.HOME || '';
+    const mac = (app, bin) => [
+      `/Applications/${app}.app/Contents/MacOS/${bin}`,
+      home ? `${home}/Applications/${app}.app/Contents/MacOS/${bin}` : '',
+    ];
+    pushFirst('chrome', '系统 Google Chrome', 'chrome', mac('Google Chrome', 'Google Chrome'));
+    pushFirst('chrome-beta', 'Google Chrome Beta', 'chrome', mac('Google Chrome Beta', 'Google Chrome Beta'));
+    pushFirst('chrome-canary', 'Google Chrome Canary', 'chrome', mac('Google Chrome Canary', 'Google Chrome Canary'));
+    pushFirst('edge', 'Microsoft Edge', 'edge', mac('Microsoft Edge', 'Microsoft Edge'));
+    pushFirst('chromium', 'Chromium', 'chromium', mac('Chromium', 'Chromium'));
+  } else {
+    // Linux / 其他：PATH 查找
+    const which = opt.which || ((name) => {
+      try {
+        const r = require('child_process').execSync(`command -v ${name} 2>/dev/null`, { timeout: 3000 }).toString().trim();
+        return r || null;
+      } catch (_) { return null; }
+    });
+    const bins = [
+      ['chrome', '系统 Google Chrome', 'chrome', ['google-chrome-stable', 'google-chrome']],
+      ['chrome-beta', 'Google Chrome Beta', 'chrome', ['google-chrome-beta']],
+      ['chrome-canary', 'Google Chrome Canary', 'chrome', ['google-chrome-unstable']],
+      ['edge', 'Microsoft Edge', 'edge', ['microsoft-edge-stable', 'microsoft-edge']],
+      ['chromium', 'Chromium', 'chromium', ['chromium-browser', 'chromium']],
+    ];
+    for (const [id, name, kind, cmds] of bins) {
+      for (const c of cmds) { const p = which(c); if (p) { out.push({ id, name, kind, exe: p }); break; } }
     }
-  } catch (_) { /* 内部 API 不可用时忽略 */ }
-
-  // 方式2：通过环境变量 PLAYWRIGHT_BROWSERS_PATH 或默认安装位置手动查找
-  try {
-    const os = require('os');
-    const candidateBases = [
-      process.env.PLAYWRIGHT_BROWSERS_PATH,
-      path.join(os.homedir(), '.cache', 'ms-playwright'),
-      path.join(os.homedir(), 'AppData', 'Local', 'ms-playwright'),
-      path.join(os.homedir(), 'Library', 'Caches', 'ms-playwright'),
-      path.join(os.homedir(), '.cache', 'playwright'),
-    ].filter(Boolean);
-
-    for (const base of candidateBases) {
-      if (!fs.existsSync(base)) continue;
-      const entries = fs.readdirSync(base).filter(d => d.startsWith('chromium-'));
-      for (const entry of entries.sort().reverse()) { // 优先最新版本
-        const candidates = [
-          path.join(base, entry, 'chrome-win', 'chrome.exe'),
-          path.join(base, entry, 'chrome-linux', 'chrome'),
-          path.join(base, entry, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
-        ];
-        for (const p of candidates) {
-          if (fs.existsSync(p) && !/edge|microsoft/i.test(p)) return p;
-        }
-      }
-    }
-  } catch (_) { /* 查找失败忽略 */ }
-
-  // 方式3：兜底用 executablePath()，但检查是否是 Edge（含 edge/microsoft 关键字则报错）
-  const playwright = require('playwright');
-  const exePath = playwright.chromium.executablePath();
-  if (/edge|microsoft/i.test(exePath)) {
-    throw new Error(
-      'Playwright 指向了系统 Edge 而非 Playwright 自带 Chromium。\n' +
-      '路径：' + exePath + '\n' +
-      '请在工具目录的命令行执行以下命令后重启工具：\n' +
-      '  npx playwright install chromium\n' +
-      '若问题仍存在，请设置环境变量后重试：\n' +
-      '  set PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=0\n' +
-      '  npx playwright install chromium'
-    );
   }
-  if (!fs.existsSync(exePath)) {
-    throw new Error('Playwright 自带 Chromium 未安装（' + exePath + ' 不存在）。\n' +
-      '请在工具目录运行：npx playwright install chromium');
-  }
-  return exePath;
+  return out;
 }
 
-// ---- Cookie 登录态（无头打标 + 有界面登录）----------------------------------
+// 端口是否空闲（纯逻辑包装，isFree 可注入便于单测）
+function netTcpPortFree(port) {
+  return new Promise((resolve) => {
+    try {
+      const srv = require('net').createServer();
+      let done = false;
+      const finish = (v) => { if (!done) { done = true; try { srv.close(); } catch (_) {} resolve(v); } };
+      srv.once('error', () => finish(false));
+      srv.once('listening', () => finish(true));
+      srv.listen(port, '127.0.0.1');
+      setTimeout(() => finish(false), 3000);
+    } catch (_) { resolve(false); }
+  });
+}
+async function pickFreePort(ports, isFree) {
+  const check = isFree || netTcpPortFree;
+  for (const p of ports) { if (await check(p)) return p; }
+  return null;
+}
+
+// 探测 CDP 调试端口是否就绪（GET /json/version）
+async function cdpProbe(port, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch(`http://${HOST}:${port}/json/version`, { signal: AbortSignal.timeout(1500) });
+      if (r.ok) return await r.json();
+    } catch (_) { /* 浏览器还在启动，下轮再试 */ }
+    await sleep(500);
+  }
+  return null;
+}
+
+/**
+ * 用指定浏览器启动一个带远程调试端口的独立实例。
+ * spawn 以参数数组传参（不经 shell），路径含中文/空格也安全。
+ * 成功返回 {proc, port, info}；失败（进程退出 / 端口无响应）返回 null 并清理子进程。
+ */
+async function launchSystemBrowser(cand, port, profileDir) {
+  const { spawn } = require('child_process');
+  const args = [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${profileDir}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-default-apps',
+    '--disable-translate',
+    SQUARE_URL,
+  ];
+  let proc = null;
+  let settled = false;
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    try {
+      proc = spawn(cand.exe, args, { detached: true, stdio: 'ignore' });
+      proc.unref();
+      proc.on('error', () => { if (!settled) { settled = true; resolve(null); } });
+      proc.on('exit', () => {
+        // 启动早期就退出（被安全策略/企业策略拦截）→ 判定失败
+        if (!settled && Date.now() - startedAt < 25000) { settled = true; resolve(null); }
+      });
+    } catch (e) {
+      settled = true; return resolve(null);
+    }
+    cdpProbe(port, 22000).then((info) => {
+      if (settled) return;
+      settled = true;
+      if (info) resolve({ proc, port, info });
+      else { try { proc.kill(); } catch (_) {} resolve(null); }
+    });
+  });
+}
+
+// ① CDP 模式：逐个候选浏览器尝试 启动→连接，全部失败返回 null
+async function tryCdpSession() {
+  const cands = browserCandidates();
+  if (!cands.length) {
+    console.log('ℹ️  未探测到系统 Chrome/Edge，将使用无头扫码模式。');
+    return null;
+  }
+  const port = await pickFreePort(CDP_CANDIDATE_PORTS);
+  if (!port) {
+    console.log('ℹ️  调试端口 9222-9225 均被占用，将使用无头扫码模式。');
+    return null;
+  }
+  const playwright = require('playwright');
+  for (const cand of cands) {
+    console.log(`🌐 尝试启动 ${cand.name}（调试端口 ${port}）…`);
+    let launched = null;
+    try { launched = await launchSystemBrowser(cand, port, CHROME_PROFILE_DIR); } catch (_) { launched = null; }
+    if (!launched) { console.log(`   ✗ ${cand.name} 启动失败或调试端口无响应，尝试下一个浏览器。`); continue; }
+    try {
+      const browser = await playwright.chromium.connectOverCDP(`http://${HOST}:${port}`, { timeout: 8000 });
+      const ctxs = browser.contexts ? browser.contexts() : [];
+      const context = ctxs[0] || await browser.newContext();
+      console.log(`   ✅ 已连接 ${cand.name}（CDP 端口 ${port}）。`);
+      return { mode: 'cdp', browser, context, browserName: cand.name, browserId: cand.id, cdpPort: port, proc: launched.proc, _workPage: null };
+    } catch (e) {
+      console.log(`   ✗ 连接 ${cand.name} 失败：${friendlyErr(e)}，尝试下一个浏览器。`);
+      try { launched.proc.kill(); } catch (_) {}
+    }
+  }
+  return null;
+}
+
+// ② 无头扫码模式：Playwright headless launch（优先系统浏览器的可执行文件，
+//    系统浏览器全无时兜底 Playwright 内置 Chromium）
+async function tryHeadlessSession() {
+  const playwright = require('playwright');
+  const baseArgs = ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--disable-dev-shm-usage'];
+  const cands = browserCandidates();
+  for (const cand of cands) {
+    try {
+      const browser = await playwright.chromium.launch({
+        headless: true,
+        executablePath: cand.exe,
+        args: baseArgs,
+      });
+      console.log(`🌐 无头模式：使用 ${cand.name}（后台运行，登录请用网页上的二维码扫码）。`);
+      const context = await browser.newContext({ userAgent: UA, viewport: { width: 1280, height: 900 } });
+      return { mode: 'headless', browser, context, browserName: cand.name + '（无头）', browserId: cand.id, cdpPort: null, proc: null, _workPage: null };
+    } catch (e) {
+      console.log(`   ✗ 无头启动 ${cand.name} 失败：${friendlyErr(e)}`);
+    }
+  }
+  // 兜底：Playwright 内置 Chromium（若未下载会给出明确指引）
+  try {
+    const browser = await playwright.chromium.launch({ headless: true, args: baseArgs });
+    const context = await browser.newContext({ userAgent: UA, viewport: { width: 1280, height: 900 } });
+    console.log('🌐 无头模式：使用 Playwright 内置 Chromium。');
+    return { mode: 'headless', browser, context, browserName: 'Playwright 内置 Chromium（无头）', browserId: 'bundled', cdpPort: null, proc: null, _workPage: null };
+  } catch (e) {
+    throw new Error(
+      '本机未找到可用浏览器，且内置 Chromium 未就绪。请安装 Google Chrome 或 Microsoft Edge 后重试；' +
+      '或在工具目录执行 npx playwright install chromium 后重启工具。原始错误：' + friendlyErr(e)
+    );
+  }
+}
+
+async function sessionAlive(sess) {
+  try { return !!(sess && sess.browser && sess.browser.isConnected && sess.browser.isConnected()); }
+  catch (_) { return false; }
+}
+
+/**
+ * 获取（或复用）浏览器会话：CDP 优先，失败自动降级无头扫码。
+ * 浏览器只启动一次；连接断开后自动重建。
+ */
+async function acquireSession() {
+  if (_session && await sessionAlive(_session)) return _session;
+  if (_sessionAcquiring) return _sessionAcquiring;
+  _sessionAcquiring = (async () => {
+    let sess = null;
+    try { sess = await tryCdpSession(); } catch (e) { console.log('CDP 模式异常：' + friendlyErr(e)); }
+    if (!sess) sess = await tryHeadlessSession();
+    sess.browser.on('disconnected', () => {
+      if (_session === sess) {
+        console.log('⚠️  浏览器连接已断开，下次操作将自动重新启动。');
+        _session = null;
+      }
+    });
+    // 无头模式：注入备份 Cookie
+    if (sess.mode === 'headless') {
+      const saved = readCookieFile();
+      if (saved.length) {
+        const n = await addCookiesSafe(sess.context, saved);
+        if (n > 0) console.log('✅ 已注入备份星图 Cookie（' + n + ' 条）。');
+      }
+    }
+    _session = sess;
+    return sess;
+  })();
+  try { return await _sessionAcquiring; } finally { _sessionAcquiring = null; }
+}
+
+/**
+ * 获取会话内的星图工作标签页：复用已打开的星图页，没有则新开并跳转达人广场。
+ */
+async function sessionWorkPage(sess) {
+  if (sess._workPage && !sess._workPage.isClosed()) return sess._workPage;
+  const ctx = sess.context;
+  const pages = ctx.pages ? ctx.pages() : [];
+  let page = pages.find(p => { try { return /xingtu\.cn/.test(p.url()); } catch (_) { return false; } }) || null;
+  if (!page) page = await ctx.newPage();
+  try { await page.setViewportSize({ width: 1280, height: 860 }); } catch (_) {}
+  let url = '';
+  try { url = page.url() || ''; } catch (_) {}
+  if (!/xingtu\.cn/.test(url)) {
+    try {
+      await page.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(2500); // 等 JS 渲染，避免误判登录态
+    } catch (e) {
+      console.log('⚠️ 打开星图异常（稍后自动重试）：' + friendlyErr(e));
+    }
+  } else {
+    try { await page.bringToFront(); } catch (_) {}
+  }
+  sess._workPage = page;
+  page.on('close', () => { if (sess._workPage === page) sess._workPage = null; });
+  return page;
+}
+
+// ---- 无头模式：登录二维码抓取 ----------------------------------------------
+let _qr = null; // { status:'starting'|'waiting'|'loggedin'|'expired', qrDataUrl, kind, updatedAt }
+const QR_SELECTORS = [
+  'img[src*="qrcode"]', 'img[src*="qr-code"]', 'img[src*="qrCode"]', 'img[src*="qr"]',
+  'img[src*="douyin"]', 'img[src*="oauth"]',
+  '[class*="qrcode"] img', '[class*="qr-code"] img', '[class*="qrCode"] img',
+  '[class*="login-qr"] img', '[class*="scan"] img', '[class*="douyin"] img', '[class*="oauth"] img',
+  'canvas[class*="qr"]', '[class*="qrcode"] canvas', '[class*="scan"] canvas', 'canvas',
+];
+async function captureLoginQr(page) {
+  for (const sel of QR_SELECTORS) {
+    try {
+      const el = await page.$(sel);
+      if (!el) continue;
+      const box = await el.boundingBox().catch(() => null);
+      // 二维码是较大的方形图（>=120px），过滤掉小图标（抖音/头条 logo 仅 24px）
+      if (box && box.width >= 120 && box.height >= 120) {
+        const buf = await el.screenshot({ type: 'png' });
+        return { qrDataUrl: 'data:image/png;base64,' + buf.toString('base64'), kind: 'element' };
+      }
+    } catch (_) { /* 选择器不匹配，试下一个 */ }
+  }
+  // 兜底：截取右侧登录卡片区域（SSO 页二维码出现在点「其他方式-抖音」后的右侧卡片中部）
+  try {
+    const vp = page.viewportSize() || { width: 1360, height: 950 };
+    const buf = await page.screenshot({
+      type: 'png',
+      clip: {
+        x: Math.round(vp.width * 0.585), y: Math.round(vp.height * 0.30),
+        width: Math.round(vp.width * 0.30), height: Math.round(vp.height * 0.42),
+      },
+    });
+    return { qrDataUrl: 'data:image/png;base64,' + buf.toString('base64'), kind: 'clip' };
+  } catch (_) { return null; }
+}
+async function refreshQr(page) {
+  const shot = await captureLoginQr(page);
+  if (shot) {
+    _qr = { status: 'waiting', ...shot, updatedAt: Date.now() };
+  } else if (_qr && _qr.status === 'waiting' && Date.now() - _qr.updatedAt > 60000) {
+    _qr = { ..._qr, status: 'expired' };
+  }
+}
+
+/**
+ * 无头模式：导航到 SSO 登录页并切到「抖音扫码」。
+ * 直达 LOGIN_URL（省去营销首页点登录/选角色），再点「其他方式-抖音」图标
+ * （.icon.douyin），右侧卡片即加载抖音扫码二维码。返回 true 表示已进入扫码流程。
+ */
+async function gotoDouyinQr(page) {
+  try {
+    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  } catch (e) {
+    console.log('⚠️ 打开登录页超时（继续尝试）：' + friendlyErr(e));
+  }
+  await page.waitForTimeout(6000); // 等 SSO 页渲染
+  // 点击「其他方式 - 抖音」图标（优先选择器，失败则坐标兜底）
+  let clicked = false;
+  try {
+    const dy = await page.$('.icon.douyin, [class*="douyin"]');
+    if (dy) { await dy.click({ timeout: 8000 }); clicked = true; }
+  } catch (_) { /* 选择器点击失败，走坐标兜底 */ }
+  if (!clicked) {
+    try {
+      const box = await page.evaluate(() => {
+        const el = document.querySelector('.icon.douyin') ||
+          Array.from(document.querySelectorAll('img,span,i,div')).find(e =>
+            /douyin/i.test((e.className || '') + ' ' + (e.src || '')) && e.getBoundingClientRect().width > 15);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      });
+      if (box) { await page.mouse.click(box.x, box.y); clicked = true; }
+    } catch (_) { /* 坐标兜底也失败 */ }
+  }
+  console.log(clicked ? '🟢 已切换到抖音扫码登录，等待二维码加载…' : '⚠️ 未找到抖音扫码入口，展示登录页截图兜底。');
+  await page.waitForTimeout(5000); // 等二维码加载
+  return clicked;
+}
+
+// ---- Cookie 登录态（备份文件，主要登录态在浏览器 profile 内）----------------
 function readCookieFile() {
   try {
     if (!fs.existsSync(COOKIES_FILE)) return [];
@@ -184,7 +496,13 @@ function readCookieFile() {
     return Array.isArray(arr) ? arr : [];
   } catch (_) { return []; }
 }
-
+function writeCookieFile(cookies) {
+  try {
+    if (Array.isArray(cookies) && cookies.length) {
+      fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2), 'utf8');
+    }
+  } catch (_) { /* 落盘失败不影响主流程 */ }
+}
 // 逐条注入 Cookie，单条失败不影响其余，返回成功条数
 async function addCookiesSafe(ctx, cookies) {
   let ok = 0;
@@ -192,42 +510,6 @@ async function addCookiesSafe(ctx, cookies) {
     try { await ctx.addCookies([ck]); ok++; } catch (_) { /* 跳过非法 / 过期项 */ }
   }
   return ok;
-}
-
-async function ensureBrowser() {
-  if (_browser && _browser.isConnected && _browser.isConnected() && _page && !_page.isClosed()) return _page;
-  if (_launching) return _launching;
-  _launching = (async () => {
-    const exePath = getPlaywrightChromiumPath();
-    console.log('✅ 使用 Chromium（无头后台运行，不弹窗）：' + exePath);
-    const playwright = require('playwright');
-    // 用普通 launch（非持久化）+ headless:true：Windows 安全策略下 headless:false 弹窗的
-    // Chromium 会被直接关闭（exitCode=0，报 "Target page, context or browser has been closed"）；
-    // 无头模式不弹窗、稳定运行，登录态靠 Cookie 文件注入。
-    _browser = await playwright.chromium.launch({
-      executablePath: exePath, // 锁定 Playwright 自带 Chromium，不用系统 Edge/Chrome
-      headless: true,
-      args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
-    });
-    const ctx = await _browser.newContext({
-      userAgent: UA,
-      viewport: { width: 1280, height: 860 },
-    });
-    // 注入已保存的星图 Cookie
-    const saved = readCookieFile();
-    if (saved.length) {
-      const n = await addCookiesSafe(ctx, saved);
-      if (n > 0) console.log('✅ 已加载星图登录 Cookie（' + n + ' 条）');
-    }
-    _page = await ctx.newPage();
-    try {
-      await _page.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await _page.waitForTimeout(2500); // 等页面 JS 渲染，避免误判登录态
-    } catch (_) { /* 网络波动忽略 */ }
-    _browser.on('disconnected', () => { _browser = null; _page = null; _launching = null; });
-    return _page;
-  })();
-  try { return await _launching; } finally { _launching = null; }
 }
 
 // 是否已登录：必须真正进入星图「创作者/广告主」区域才算已登录——
@@ -261,62 +543,91 @@ async function checkLoggedIn(page) {
   } catch { return false; }
 }
 
-// ---- 有界面登录（headed Chromium 弹窗扫码）---------------------------------
+// ---- 登录（在已 CDP 连接的系统 Chrome 里打开星图标签页，等待扫码）----------
 // /login 正在等待扫码时为 true，/health 据此让前端显示「等待扫码中…」。
 let _loginPending = false;
 const LOGIN_WAIT_MS = 180000; // 扫码最长等待 3 分钟
 
 /**
- * 启动一个【有界面】Chromium 窗口打开星图达人广场，轮询检测登录态。
- * 成功：Cookie 落盘 .xc-cookies.json，关窗返回 {ok:true}；
- * 失败：超时 / 窗口被关 / 前端取消，关窗返回 {ok:false,message}。
+ * 统一登录流程（自动适配浏览器会话模式）：
+ * - CDP 模式：系统 Chrome/Edge 窗口已打开星图页，服务商在窗口里扫码；
+ * - 无头模式：工具截取登录页二维码写入 _qr，前端 GET /login/qr 展示，
+ *   服务商在网页上用手机抖音 App 扫码。
+ * 返回 {ok, loggedIn, cancelled?, needInstall?, mode?, browserName?, message?}。
  * @param {{aborted:boolean}} signal 前端取消标志（请求中断时置 true）
  */
-async function headedLogin(signal) {
-  const playwright = require('playwright');
-  const exePath = getPlaywrightChromiumPath();
-  console.log('🟢 启动有界面 Chromium 供扫码登录：' + exePath);
-  const browser = await playwright.chromium.launch({
-    executablePath: exePath,
-    headless: false, // 有界面，供服务商扫码
-    args: ['--disable-blink-features=AutomationControlled'],
-  });
-  let disconnected = false;
-  browser.on('disconnected', () => { disconnected = true; });
+async function runLogin(signal) {
+  let sess = null;
   try {
-    const ctx = await browser.newContext({
-      userAgent: UA,
-      viewport: { width: 1280, height: 800 },
-    });
-    const page = await ctx.newPage();
-    try {
-      await page.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    } catch (e) {
-      console.log('⚠️ 打开星图页面异常（仍可在窗口内手动刷新）：' + friendlyErr(e));
-    }
-    const deadline = Date.now() + LOGIN_WAIT_MS;
-    while (Date.now() < deadline) {
-      if (disconnected) return { ok: false, message: '登录窗口被关闭，请重新点「登录星图」再试' };
-      if (signal && signal.aborted) return { ok: false, message: '已取消登录' };
-      let logged = false;
-      try { logged = await checkLoggedIn(page); } catch (_) { /* 页面跳转中，下轮再测 */ }
-      if (logged) {
-        // checkLoggedIn 成功时已回写一次 Cookie，这里再显式落盘兜底
-        try {
-          const cookies = await ctx.cookies();
-          if (Array.isArray(cookies) && cookies.length) {
-            fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2), 'utf8');
-          }
-        } catch (_) { /* 忽略 */ }
-        console.log('✅ 扫码登录成功，Cookie 已保存到 .xc-cookies.json');
-        return { ok: true, loggedIn: true, message: '登录成功，登录窗口即将自动关闭' };
-      }
-      await sleep(2000);
-    }
-    return { ok: false, loggedIn: false, message: '登录超时（3 分钟内未检测到登录成功），请重试' };
-  } finally {
-    try { await browser.close(); } catch (_) { /* 已关闭则忽略 */ }
+    sess = await acquireSession();
+  } catch (e) {
+    return { ok: false, loggedIn: false, needInstall: true, message: friendlyErr(e) };
   }
+  // 取一个工作标签页（复用已打开的；登录成功后它就是登录态广场页，供打标复用）
+  let page = sess._workPage;
+  if (!page || page.isClosed()) {
+    page = await sess.context.newPage().catch(() => null);
+    if (!page) return { ok: false, loggedIn: false, message: '无法打开浏览器标签页，请重试。', mode: sess.mode };
+    sess._workPage = page;
+    try { await page.setViewportSize({ width: 1360, height: 950 }); } catch (_) {}
+  }
+
+  // 已登录快速返回（页面在 /ad/ 广场区域）
+  if (await checkLoggedIn(page)) {
+    writeCookieFile(await sess.context.cookies().catch(() => []));
+    _qr = { status: 'loggedin', qrDataUrl: null, updatedAt: Date.now() };
+    return { ok: true, loggedIn: true, mode: sess.mode, browserName: sess.browserName, message: '已是登录状态' };
+  }
+
+  // 未登录：导航到直达 SSO 登录页
+  if (sess.mode === 'cdp') {
+    try {
+      const u = (() => { try { return page.url(); } catch (_) { return ''; } })();
+      if (!/sso\.oceanengine\.com|\/ad\//.test(u)) await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.bringToFront();
+    } catch (_) { /* 导航失败也让用户在可见窗口里手动操作 */ }
+    console.log('🟢 请在已打开的 ' + sess.browserName + ' 窗口中登录巨量星图（可抖音扫码或手机验证码）…');
+  } else {
+    console.log('🟢 无头模式：正在打开抖音扫码登录，请在工作台网页用手机抖音 App 扫码…');
+    _qr = { status: 'starting', qrDataUrl: null, updatedAt: Date.now() };
+    await gotoDouyinQr(page);
+  }
+
+  const deadline = Date.now() + LOGIN_WAIT_MS;
+  let lastReload = Date.now();
+  while (Date.now() < deadline) {
+    if (signal && signal.aborted) {
+      console.log('ℹ️  用户取消了登录等待。');
+      return { ok: false, loggedIn: false, cancelled: true, mode: sess.mode, message: '已取消登录' };
+    }
+    if (!(await sessionAlive(sess))) {
+      return { ok: false, loggedIn: false, message: '浏览器连接中断，请重新点「登录星图」（工具会自动重启浏览器）。', mode: sess.mode };
+    }
+    // 无头模式：持续刷新二维码；停留超过 100 秒未扫码则重新进抖音扫码换新码
+    if (sess.mode === 'headless') {
+      await refreshQr(page);
+      if (Date.now() - lastReload > 100000 && _qr && _qr.status !== 'loggedin') {
+        await gotoDouyinQr(page).catch(() => {});
+        lastReload = Date.now();
+      }
+    }
+    let logged = false;
+    try { logged = await checkLoggedIn(page); } catch (_) { /* 页面跳转中，下轮再测 */ }
+    if (logged) {
+      writeCookieFile(await sess.context.cookies().catch(() => []));
+      _qr = { status: 'loggedin', qrDataUrl: null, updatedAt: Date.now() };
+      sess._workPage = page; // 登录态广场页，打标直接复用
+      console.log('✅ 登录成功，Cookie 已备份到 .xc-cookies.json。');
+      return { ok: true, loggedIn: true, mode: sess.mode, browserName: sess.browserName, message: '登录成功' };
+    }
+    await sleep(2200);
+  }
+  return {
+    ok: false, loggedIn: false, mode: sess.mode,
+    message: sess.mode === 'headless'
+      ? '登录超时（3 分钟未扫码成功）：请用手机抖音 App 扫描网页上的二维码后重试。'
+      : '登录超时（3 分钟未检测到登录成功）：请在打开的浏览器窗口里完成巨量星图扫码后重试。',
+  };
 }
 
 // ---- 星图接口抓取（在页面上下文内 fetch，同源自动带 Cookie）----------------
@@ -591,64 +902,69 @@ function startServer() {
   app.use(express.json({ limit: '5mb' }));
   app.use(express.raw({ type: () => true, limit: '15mb' })); // 接收上传文件原始字节
 
-  // 健康检查 / 登录状态
+  // 健康检查 / 登录状态 / 浏览器模式
   app.get('/health', async (_req, res) => {
     let loggedIn = false;
+    let browserInfo = { mode: null, ready: false, name: '', cdpPort: null };
     try {
-      if (_page) loggedIn = await checkLoggedIn(_page);
-      else if (!_loginPending) ensureBrowser().catch(() => {}); // 尚未启动则后台预热（扫码等待中不抢占）
-    } catch (_) {}
+      if (_session && await sessionAlive(_session)) {
+        browserInfo = { mode: _session.mode, ready: true, name: _session.browserName, cdpPort: _session.cdpPort || null };
+        const page = await sessionWorkPage(_session);
+        loggedIn = await checkLoggedIn(page);
+      }
+    } catch (_) { /* 探测失败按未登录处理 */ }
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.1.0', port: PORT,
+      ok: true, loggedIn, version: '3.2.0', port: PORT,
       loginUrl: SQUARE_URL,
       cookiesFile: '.xc-cookies.json',
       cookieCount,
       loginPending: _loginPending,
+      browser: browserInfo,
       loginNote: loggedIn ? '' :
-        '请点工作台「🚀 登录星图」按钮，本机会弹出 Chrome 窗口，在窗口里完成星图扫码登录，' +
-        '窗口会自动关闭（登录态保存在本机，仅需一次）。',
+        '请点工作台「🚀 登录星图」按钮：工具会自动打开系统 Chrome/Edge 窗口扫码；' +
+        '若电脑无可用浏览器，则在网页上显示二维码，用手机抖音 App 扫码登录。',
     });
   });
 
-  // 弹窗扫码登录：POST /login
-  // - 已有有效登录态 → 直接返回；
-  // - 否则启动【有界面】Chromium 窗口，每 2 秒检测一次，最多等 180 秒；
-  // - 前端取消（请求中断）/ 窗口被手动关闭 / 超时，都会中止并返回提示。
+  // 登录二维码（无头模式专用）：前端登录等待中每 ~2.5s 轮询
+  app.get('/login/qr', (_req, res) => {
+    if (!_session) return res.json({ ok: true, mode: null, status: 'starting' });
+    if (_session.mode === 'cdp') {
+      return res.json({ ok: true, mode: 'cdp', status: _loginPending ? 'waiting' : 'idle', browserName: _session.browserName });
+    }
+    res.json({
+      ok: true, mode: 'headless',
+      status: (_qr && _qr.status) || 'starting',
+      qr: (_qr && _qr.qrDataUrl) || null,
+      kind: (_qr && _qr.kind) || null,
+      browserName: _session.browserName,
+    });
+  });
+
+  // 扫码登录：POST /login
+  // - 自动启动/复用浏览器会话（CDP 系统浏览器优先，无头扫码兜底）；
+  // - 每 2.2 秒检测一次登录态，最多等 180 秒；
+  // - 前端取消（请求中断）/ 浏览器断开 / 超时，都会中止并返回中文提示。
   app.post('/login', async (req, res) => {
     if (_loginPending) {
-      return res.status(409).json({ ok: false, pending: true, error: '已有登录窗口在等待扫码，请在弹出的 Chrome 窗口里完成登录' });
+      return res.status(409).json({ ok: false, pending: true, error: '已有登录任务在等待扫码，请完成登录或取消后重试' });
     }
     let aborted = false;
     req.on('close', () => { aborted = true; }); // 前端点「取消」或离开页面
+    _loginPending = true;
     try {
-      // 1) 先用现有 Cookie 快速验证一次，已登录就不弹窗
-      try {
-        const page = await ensureBrowser();
-        if (await checkLoggedIn(page)) {
-          return res.json({ ok: true, loggedIn: true, message: '已登录，无需重复操作' });
-        }
-      } catch (_) { /* 无头浏览器异常也继续走弹窗登录 */ }
-      // 2) 弹出有界面窗口等扫码
-      _loginPending = true;
-      const r = await headedLogin({ get aborted() { return aborted; } });
-      if (r.ok) {
-        // 登录成功：重置无头浏览器，下次打标用新 Cookie 启动
-        if (_browser) { try { await _browser.close(); } catch (_) {} }
-        _browser = null; _page = null; _launching = null;
+      const r = await runLogin({ get aborted() { return aborted; } });
+      if (r.needInstall) {
+        return res.status(503).json({ ok: false, needInstall: true, error: r.message });
       }
       res.json({
-        ok: !!r.ok, loggedIn: !!r.loggedIn, pending: false,
+        ok: !!r.ok, loggedIn: !!r.loggedIn, pending: false, cancelled: !!r.cancelled,
+        mode: r.mode || null, browserName: r.browserName || '',
         message: r.message || (r.ok ? '登录成功' : '登录失败，请重试'),
       });
     } catch (e) {
-      const raw = friendlyErr(e).split('Browser logs')[0].trim();
-      res.status(500).json({
-        ok: false,
-        error: '登录窗口启动失败：' + raw +
-          '。请确认电脑有图形桌面环境（不能在远程服务器/无桌面环境运行）；' +
-          '若浏览器被安全软件拦截，请放行后重试。',
-      });
+      res.status(500).json({ ok: false, error: '登录流程异常：' + friendlyErr(e) });
     } finally {
       _loginPending = false;
     }
@@ -674,10 +990,21 @@ function startServer() {
       let items = (req.body && req.body.items) || [];
       if (!Array.isArray(items) || !items.length) return res.status(400).json({ ok: false, error: 'items 为空' });
       items = items.slice(0, 1000); // 单次上限，保护本机
-      const page = await ensureBrowser();
+      let sess;
+      try {
+        sess = await acquireSession();
+      } catch (e) {
+        return res.status(503).json({ ok: false, needInstall: true, error: friendlyErr(e) });
+      }
+      const page = await sessionWorkPage(sess);
       const loggedIn = await checkLoggedIn(page);
       if (!loggedIn) {
-        return res.status(401).json({ ok: false, loggedIn: false, error: '星图未登录：请点工作台「🚀 登录星图」按钮，在弹出的 Chrome 窗口里扫码登录后再开始打标' });
+        return res.status(401).json({
+          ok: false, loggedIn: false, mode: sess.mode,
+          error: sess.mode === 'headless'
+            ? '星图未登录：请点工作台「🚀 登录星图」按钮，用手机抖音 App 扫描网页上显示的二维码登录后再打标'
+            : '星图未登录：请点工作台「🚀 登录星图」按钮，在自动打开的 Chrome/Edge 窗口里扫码登录后再打标',
+        });
       }
 
       const results = [];
@@ -727,25 +1054,52 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.1.0（离线包，依赖与浏览器已内置）');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.2.0');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
     console.log('  使用 3 步：');
-    console.log('   1) 保持本窗口打开（打标时浏览器在后台无头运行，不弹窗）；');
-    console.log('   2) 在工作台网页点「🚀 登录星图」，本机弹出 Chrome 窗口，');
-    console.log('      扫码登录后窗口自动关闭（登录态保存在本机，仅需一次）；');
+    console.log('   1) 保持本窗口打开；');
+    console.log('   2) 在工作台网页点「🚀 登录星图」——工具会自动打开系统');
+    console.log('      Chrome/Edge 窗口扫码；若无可用浏览器，网页会显示二维码，');
+    console.log('      用手机抖音 App 扫码登录（登录态保存在本机，仅需一次）；');
     console.log('   3) 上传达人名单 Excel，点「开始打标」等待结果。');
     console.log('==================================================\n');
-    ensureBrowser().then(async (page) => {
-      const in_ = await checkLoggedIn(page);
-      console.log(in_ ? '✅ 检测到星图登录态有效（.xc-cookies.json），可直接使用。\n'
-        : '⚠️  尚未登录：请到工作台网页点「🚀 登录星图」扫码（弹窗约 3 分钟内有效）。\n');
-    }).catch(e => console.log('⚠️  后台浏览器启动失败：' + friendlyErr(e) + '\n   登录时会自动重试；若提示缺少浏览器，请运行：npx playwright install chromium\n'));
+    // 启动后自动准备浏览器会话（CDP 模式会自动打开 Chrome/Edge 窗口）
+    setTimeout(() => {
+      acquireSession().then(async (sess) => {
+        const page = await sessionWorkPage(sess);
+        const in_ = await checkLoggedIn(page);
+        console.log(in_
+          ? `✅ 检测到星图登录态有效，可直接使用（浏览器：${sess.browserName}）。\n`
+          : `ℹ️  尚未登录：请到工作台点「🚀 登录星图」扫码（当前浏览器：${sess.browserName}）。\n`);
+      }).catch(e => console.log('⚠️  浏览器自动启动失败：' + friendlyErr(e) + '\n   点「登录星图」时会自动重试。\n'));
+    }, 800);
   });
 }
 
+// 直接运行时启动服务；被 require（单测）时仅导出纯逻辑函数
+if (require.main && require.main.filename === __filename) {
+  startServer();
+}
+
+module.exports = {
+  browserCandidates,
+  pickFreePort,
+  netTcpPortFree,
+  checkLoggedIn,
+  captureLoginQr,
+  tierOf,
+  scoreConsumption,
+  scoreDeliveries,
+  scoreEcomLevel,
+  S_LEVEL_SCORE,
+  QR_SELECTORS,
+  CDP_CANDIDATE_PORTS,
+  CHROME_PROFILE_DIR,
+  SQUARE_URL,
+  LOGIN_URL,
+};
+
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function friendlyErr(e) { return (e && (e.message || String(e))) || '未知错误'; }
-
-startServer();
