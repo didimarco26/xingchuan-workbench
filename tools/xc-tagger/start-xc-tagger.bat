@@ -84,9 +84,18 @@ if not exist node_modules (
     )
 )
 
-rem 3) Ensure Playwright Chromium browser (idempotent; ~150MB on first run, skipped when installed)
-echo Checking Playwright browser...
+rem 3) Ensure Playwright's OWN Chromium is installed (run every time - already installed = a few seconds)
+rem    This forces Playwright's Chromium and prevents using system Edge (Edge exits when automated)
+echo Checking Playwright Chromium browser...
 call npx playwright install chromium
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Chromium download failed. Check your network and double-click again.
+    echo.
+    pause
+    exit /b 1
+)
+echo [OK] Chromium ready.
 
 rem 4) Start the tool
 echo.

@@ -117,9 +117,18 @@ async function ensureBrowser() {
   if (_browser && _page && _browser.isConnected && _browser.isConnected()) return _page;
   if (_launching) return _launching;
   _launching = (async () => {
-    const { chromium } = require('playwright');
+    const playwright = require('playwright');
+    // 强制使用 Playwright 自己下载的 Chromium：显式传 executablePath，
+    // 杜绝任何情况下回退到系统 Edge/Chrome（系统 Edge 被自动化控制时会主动退出，
+    // 报 "Target page, context or browser has been closed"）。
+    const exePath = playwright.chromium.executablePath();
+    if (!fs.existsSync(exePath)) {
+      throw new Error('Playwright 自带 Chromium 未安装（' + exePath + ' 不存在）。\n' +
+        '   请双击启动脚本（会自动安装），或在工具目录执行：npx playwright install chromium');
+    }
     fs.mkdirSync(PROFILE_DIR, { recursive: true });
-    _browser = await chromium.launchPersistentContext(PROFILE_DIR, {
+    _browser = await playwright.chromium.launchPersistentContext(PROFILE_DIR, {
+      executablePath: exePath, // 锁定 Playwright Chromium，不用系统浏览器
       headless: false, // 需要可见窗口以便扫码登录
       viewport: { width: 1280, height: 860 },
       args: ['--disable-blink-features=AutomationControlled', '--start-maximized'],

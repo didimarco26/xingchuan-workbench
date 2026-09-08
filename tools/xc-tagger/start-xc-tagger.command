@@ -68,9 +68,17 @@ if [ ! -d node_modules ]; then
   fi
 fi
 
-# 3) 确保 Playwright Chromium 浏览器已安装（幂等：首次下载约 150MB，已安装则秒过）
-echo "⏳ 检查 Playwright Chromium 浏览器（首次会下载约 150MB，请耐心等待，之后秒过）..."
-npx playwright install chromium || echo "⚠️ 浏览器检查/下载失败，若稍后启动时报浏览器错误，请检查网络后重新双击本脚本。"
+# 3) 确保 Playwright 自带 Chromium 已安装（每次启动都执行，已装则秒过，未装则自动下载）
+#    强制用 Playwright 自己的 Chromium，不用系统 Edge/Chrome（Edge 被自动化控制后会主动退出）
+echo "⏳ 正在验证 Playwright Chromium 浏览器..."
+npx playwright install chromium
+if [ $? -ne 0 ]; then
+  echo "⚠️ 浏览器下载失败，请检查网络后重新双击本脚本。"
+  echo "按任意键关闭窗口..."
+  read -n 1
+  exit 1
+fi
+echo "   Chromium 已就绪。"
 
 # 4) 启动工具
 echo ""
