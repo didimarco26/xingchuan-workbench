@@ -1356,7 +1356,7 @@ function startServer() {
     if (loggedIn) _loggedIn = true;
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.5.0', port: PORT,
+      ok: true, loggedIn, version: '3.5.1', port: PORT,
       loginUrl: SQUARE_URL,
       cookiesFile: '.xc-cookies.json',
       cookieCount,
@@ -1439,7 +1439,28 @@ function startServer() {
         return res.status(503).json({ ok: false, needInstall: true, error: friendlyErr(e) });
       }
       const page = await sessionWorkPage(sess);
-      const loggedIn = await checkLoggedIn(page);
+      // v3.5.1：优先信任内存登录位 _loggedIn（登录成功时已置 true）；
+      // 仅当内存位为 false 时才用 checkLoggedIn 做 URL 二次探测，避免
+      // sessionWorkPage 导航到非 /ad/ 页面时误判为未登录。
+      let loggedIn = !!_loggedIn;
+      if (!loggedIn) {
+        loggedIn = await checkLoggedIn(page);
+        // 补扫所有标签页 URL（与 /health 逻辑保持一致）
+        if (!loggedIn && _session && await sessionAlive(_session)) {
+          let ctxs = [];
+          try { ctxs = (_session.browser && typeof _session.browser.contexts === 'function') ? _session.browser.contexts() : []; } catch (_) { ctxs = []; }
+          if (!ctxs.includes(_session.context)) ctxs.push(_session.context);
+          outer2: for (const ctx of ctxs) {
+            let pages = [];
+            try { pages = (ctx && typeof ctx.pages === 'function') ? ctx.pages() : []; } catch (_) { continue; }
+            for (const pg of pages) {
+              try {
+                if (pg && !pg.isClosed() && isLoggedInUrl(pg.url() || '')) { loggedIn = true; break outer2; }
+              } catch (_) { /* skip */ }
+            }
+          }
+        }
+      }
       if (!loggedIn) {
         return res.status(401).json({
           ok: false, loggedIn: false, mode: sess.mode,
@@ -1516,7 +1537,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.5.0');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.5.1');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
