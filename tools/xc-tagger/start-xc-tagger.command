@@ -21,23 +21,13 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-# 2) 首次运行自动安装依赖（含 Playwright Chromium 浏览器）
+# 2) 首次运行自动安装依赖（npm postinstall 会自动下载 Playwright Chromium）
 if [ ! -d node_modules ]; then
   echo "⏳ 首次运行，正在自动安装依赖（npm install），请耐心等待..."
   npm install
   if [ $? -ne 0 ]; then
     echo ""
     echo "❌ 依赖安装失败，请检查网络后重新双击本脚本。"
-    echo "按任意键关闭窗口..."
-    read -n 1
-    exit 1
-  fi
-  echo ""
-  echo "⏳ 正在安装 Playwright Chromium 浏览器（仅首次）..."
-  npx --yes playwright install chromium
-  if [ $? -ne 0 ]; then
-    echo ""
-    echo "❌ 浏览器安装失败，请检查网络后重新双击本脚本。"
     echo "按任意键关闭窗口..."
     read -n 1
     exit 1
