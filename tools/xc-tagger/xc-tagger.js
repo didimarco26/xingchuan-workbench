@@ -113,23 +113,82 @@ let _browser = null;
 let _page = null;
 let _launching = null;
 
+/**
+ * 获取 Playwright 自己管理的 Chromium 可执行路径。
+ * playwright.chromium.executablePath() 在部分 Windows 机器上会返回系统 Edge 的路径
+ * （Edge 被自动化控制后会主动退出，报 "Target page, context or browser has been closed"）。
+ * 此函数尝试多种方式拿到真正的 Playwright Chromium，并做路径合法性校验。
+ */
+function getPlaywrightChromiumPath() {
+  // 方式1：通过 Playwright 内部 registry 查询真实下载路径（1.x 可用）
+  try {
+    const { registry } = require('playwright/lib/server/registry');
+    const executable = registry.findExecutable('chromium');
+    if (executable) {
+      const p = executable.executablePath('linux') || executable.executablePath();
+      if (p && fs.existsSync(p) && !/edge|microsoft/i.test(p)) return p;
+    }
+  } catch (_) { /* 内部 API 不可用时忽略 */ }
+
+  // 方式2：通过环境变量 PLAYWRIGHT_BROWSERS_PATH 或默认安装位置手动查找
+  try {
+    const os = require('os');
+    const candidateBases = [
+      process.env.PLAYWRIGHT_BROWSERS_PATH,
+      path.join(os.homedir(), '.cache', 'ms-playwright'),
+      path.join(os.homedir(), 'AppData', 'Local', 'ms-playwright'),
+      path.join(os.homedir(), 'Library', 'Caches', 'ms-playwright'),
+      path.join(os.homedir(), '.cache', 'playwright'),
+    ].filter(Boolean);
+
+    for (const base of candidateBases) {
+      if (!fs.existsSync(base)) continue;
+      const entries = fs.readdirSync(base).filter(d => d.startsWith('chromium-'));
+      for (const entry of entries.sort().reverse()) { // 优先最新版本
+        const candidates = [
+          path.join(base, entry, 'chrome-win', 'chrome.exe'),
+          path.join(base, entry, 'chrome-linux', 'chrome'),
+          path.join(base, entry, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+        ];
+        for (const p of candidates) {
+          if (fs.existsSync(p) && !/edge|microsoft/i.test(p)) return p;
+        }
+      }
+    }
+  } catch (_) { /* 查找失败忽略 */ }
+
+  // 方式3：兜底用 executablePath()，但检查是否是 Edge（含 edge/microsoft 关键字则报错）
+  const playwright = require('playwright');
+  const exePath = playwright.chromium.executablePath();
+  if (/edge|microsoft/i.test(exePath)) {
+    throw new Error(
+      'Playwright 指向了系统 Edge 而非 Playwright 自带 Chromium。\n' +
+      '路径：' + exePath + '\n' +
+      '请在工具目录的命令行执行以下命令后重启工具：\n' +
+      '  npx playwright install chromium\n' +
+      '若问题仍存在，请设置环境变量后重试：\n' +
+      '  set PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=0\n' +
+      '  npx playwright install chromium'
+    );
+  }
+  if (!fs.existsSync(exePath)) {
+    throw new Error('Playwright 自带 Chromium 未安装（' + exePath + ' 不存在）。\n' +
+      '请在工具目录运行：npx playwright install chromium');
+  }
+  return exePath;
+}
+
 async function ensureBrowser() {
   if (_browser && _page && _browser.isConnected && _browser.isConnected()) return _page;
   if (_launching) return _launching;
   _launching = (async () => {
-    const playwright = require('playwright');
-    // 强制使用 Playwright 自己下载的 Chromium：显式传 executablePath，
-    // 杜绝任何情况下回退到系统 Edge/Chrome（系统 Edge 被自动化控制时会主动退出，
-    // 报 "Target page, context or browser has been closed"）。
-    const exePath = playwright.chromium.executablePath();
-    if (!fs.existsSync(exePath)) {
-      throw new Error('Playwright 自带 Chromium 未安装（' + exePath + ' 不存在）。\n' +
-        '   请双击启动脚本（会自动安装），或在工具目录执行：npx playwright install chromium');
-    }
+    const exePath = getPlaywrightChromiumPath();
+    console.log('✅ 使用 Chromium：' + exePath);
     fs.mkdirSync(PROFILE_DIR, { recursive: true });
+    const playwright = require('playwright');
     _browser = await playwright.chromium.launchPersistentContext(PROFILE_DIR, {
-      executablePath: exePath, // 锁定 Playwright Chromium，不用系统浏览器
-      headless: false, // 需要可见窗口以便扫码登录
+      executablePath: exePath, // 锁定 Playwright 自带 Chromium，不用系统 Edge/Chrome
+      headless: false,
       viewport: { width: 1280, height: 860 },
       args: ['--disable-blink-features=AutomationControlled', '--start-maximized'],
     });
