@@ -1,37 +1,46 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.3
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.4
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，它会：
  *   1) 在 127.0.0.1:7842 起一个本地 HTTP 服务（只监听本机，不对外）；
  *   2) 浏览器方案（CDP 优先）：工具自动用【系统 Chrome/Edge】以远程调试端口
  *      启动一个独立实例（独立 user-data-dir=.xc-chrome-profile，与用户日常
  *      浏览器互不干扰），再 connectOverCDP 附加。浏览器真实可见，服务商在
- *      窗口里直接扫码/验证码登录。
- *      ★ v3.3 修复：启动/登录前会先【附加已在运行的调试 Chrome】
- *        （9222-9225 端口逐个探测）——上一次运行残留的调试窗口（detached
- *        启动，工具退出后浏览器仍在）会被直接复用，里面的登录态自然有效；
- *        不再因 profile 目录锁导致 spawn 静默失败、误降级无头。
- *      —— Windows 安全策略会立即关闭 Playwright 自己 launch 的 Chromium
- *         窗口（exitCode=0），但系统 Chrome 由本工具以普通进程方式拉起，不受影响。
- *   3) 登录（仅需一次）：网页点「🚀 登录星图」→ POST /login，工具复用浏览器里
- *      已有的星图/SSO 标签页（不重复开页），服务商在该窗口扫码/验证码登录；
- *      工具每 2.2 秒遍历【所有标签页】检测登录态（任一标签进入星图 /ad/
- *      创作者区域即判成功；落在营销首页等非 /ad/ 页时自动导航到达人广场复核），
- *      成功后 Cookie 写入 .xc-cookies.json 备份（登录态主体保存在
- *      .xc-chrome-profile 浏览器配置目录，长期免登录）。
- *      超时 180 秒 / 点「取消」中止。
- *   4) 打标：POST /tag 复用同一条 CDP 连接，在同一个 Chrome 里开后台标签页
- *      抓取（标签页可见，可看到工具在工作；关闭浏览器窗口即停止）。
+ *      窗口里直接扫码/账号密码登录。
+ *      启动/登录前会先【附加已在运行的调试 Chrome】（9222-9225 端口逐个
+ *      探测）——上一次运行残留的调试窗口会被直接复用，里面的登录态自然有效。
+ *   3) 登录（仅需一次）：网页点「🚀 登录星图」→ POST /login，工具每 3 秒
+ *      【主动轮询所有标签页的 URL】（遍历浏览器全部上下文，不依赖页面内容、
+ *      不读 innerText）：只要任意标签页 URL 在 xingtu.cn 下且路径含 /ad/
+ *      （创作者/广告主区域，未登录访问会被重定向到 sso.oceanengine.com），
+ *      立即判定登录成功——
+ *        ① Cookie 全量写入 .xc-cookies.json 备份；
+ *        ② 【自动关闭浏览器窗口】（CDP 模式；登录态保存在 .xc-chrome-profile
+ *           配置目录，打标时工具在后台自动重开浏览器、免登录）；
+ *        ③ 内存登录位置位，/health 立即返回 loggedIn=true，前端自动刷新。
+ *      检测超时 5 分钟 / 点「取消」中止。
+ *      ★ v3.4 修复（服务商反馈「窗口里账号密码登录成功，但窗口不关闭、
+ *        网页仍提示未登录」）：
+ *        · 登录判定从「URL + 页面正文启发式」改为【纯 URL 判定】——旧版
+ *          page.evaluate 读 innerText 在页面跳转瞬间会抛异常、在角色选择/
+ *          营销首页等子页面会误判，是漏检的根因；
+ *        · 轮询范围从单一上下文扩大到浏览器【全部上下文的全部标签页】；
+ *        · 登录成功后按预期【自动关闭窗口】（v3.3 误保留为不关闭）；
+ *        · /health 不再为探测登录态而启动/导航浏览器，直接读内存登录位 +
+ *          对存活会话做零副作用 URL 扫描，前端轮询即时反映状态。
+ *   4) 打标：POST /tag 时若浏览器已关闭则自动后台重开（同一配置目录，
+ *      登录态仍在），在后台标签页抓取；关闭浏览器窗口即停止。
  *   5) 网页（星川决策工作台·服务商 GitHub 版）调用本地接口：
  *        GET  /health   → 探测服务、CDP 连接与登录状态（含 loginPending）
  *        GET  /login/qr → 无头模式的登录二维码（CDP 模式无图）
- *        POST /login    → 在 Chrome 中打开星图页并等待扫码登录
+ *        POST /login    → 在 Chrome 中打开星图页并等待登录
  *        POST /parse    → 解析上传的 Excel/CSV 达人名单
  *        POST /tag      → 用星图登录态抓取达人信息并按存量逻辑分层打标
  *   兜底：系统浏览器全部不可用 / 调试端口被企业策略禁用时，自动降级无头扫码
- *      模式（Playwright headless + 网页展示抖音二维码，手机扫码登录）。
+ *      模式（Playwright headless + 网页展示抖音二维码，手机扫码登录；无头
+ *      模式无窗口可关，浏览器保留供打标）。
  *   Cookie 只留在服务商本机，不上传、不落库。
  *
  * 运行：解压后双击 start-xc-tagger.command(Mac) / start-xc-tagger.bat(Windows)
@@ -594,41 +603,44 @@ async function addCookiesSafe(ctx, cookies) {
   return ok;
 }
 
-// 是否已登录：必须真正进入星图「创作者/广告主」区域才算已登录——
-//   · URL 含 redirect_uri / passport / sso / login（被踢去登录）→ 未登录；
-//   · URL 不在 xingtu.cn 或不含 /ad/ 路径（停在营销首页 www.xingtu.cn/）→ 未登录；
-//   · 页面空白（加载失败/网络异常）→ 未登录（宁可让用户重新扫码，不可误判已登录）；
-//   · 页面出现扫码/手机号登录入口且无达人广场特征 → 未登录。
-// 已登录时自动把最新 Cookie 回写文件（刷新有效期），实现长期免登录。
+// ★ v3.4：纯 URL 登录判定（不读页面内容）。
+// 规则：URL 在 xingtu.cn 域名下，且路径含 /ad/（创作者/广告主区域），即视为已登录。
+// 依据：未登录访问任意 /ad/ 页会被星图重定向到 sso.oceanengine.com 登录页（URL 离开
+// xingtu.cn）；营销首页/角色页在 www.xingtu.cn 根路径（不含 /ad/）。旧版读 innerText
+// 的启发式在页面跳转瞬间（Execution context destroyed）会抛异常、在角色选择等子页面
+// 会因正文关键词不匹配而误判，是「窗口里已登录、工具却提示未登录」的根因。
+// 另排除仍在登录链路上的 URL（SSO/护照/redirect_uri 参数/login 路径），双保险。
+function isLoggedInUrl(url) {
+  if (!url) return false;
+  let host = '', path = '';
+  try {
+    const p = new URL(String(url));
+    host = p.hostname || '';
+    path = p.pathname || '';
+  } catch (_) { return false; }
+  if (!/(^|\.)xingtu\.cn$/i.test(host)) return false;      // 主机名必须是星图域名（含子域）
+  if (!/(^|\/)ad(?:\/|$)/i.test(path)) return false;       // 路径必须含 /ad 段（创作者/广告主区域）
+  if (/\/(sso|passport|login)(?:\/|$)/i.test(path)) return false; // 仍在登录链路
+  return true;
+}
+
+// 页面级判定（供 /tag 等在 sessionWorkPage 导航到广场后调用）：只看该页 URL。
 async function checkLoggedIn(page) {
   try {
-    const url = page.url() || '';
-    if (/redirect_uri|passport|sso|login/i.test(url)) return false;
-    if (!/xingtu\.cn\//.test(url)) return false;
-    if (!/\/ad\//.test(url)) return false;
-    const loggedIn = await page.evaluate(() => {
-      const t = document.body ? document.body.innerText : '';
-      if (t.trim().length < 40) return false; // 空白页/加载中，不能判定已登录
-      // 出现明显「扫码登录 / 手机号登录」入口且无达人广场特征，判为未登录
-      const hasLoginBtn = /扫码登录|登录巨量星图|手机号登录|验证码登录|免费登录/.test(t) && !/达人广场|找达人|达人榜单/.test(t);
-      return !hasLoginBtn;
-    });
-    if (loggedIn) {
-      try {
-        const cookies = await page.context().cookies();
-        if (Array.isArray(cookies) && cookies.length) {
-          fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2), 'utf8');
-        }
-      } catch (_) { /* 回写失败不影响判定 */ }
-    }
-    return loggedIn;
+    if (!page) return false;
+    try { if (page.isClosed && page.isClosed()) return false; } catch (_) { return false; }
+    return isLoggedInUrl(page.url() || '');
   } catch { return false; }
 }
 
-// ---- 登录（在已 CDP 连接的系统 Chrome 里打开星图标签页，等待扫码）----------
-// /login 正在等待扫码时为 true，/health 据此让前端显示「等待扫码中…」。
+// ---- 登录（在已 CDP 连接的系统 Chrome 里打开星图标签页，等待扫码/账号密码登录）----
+// /login 正在等待登录时为 true，/health 据此让前端显示「等待登录中…」。
 let _loginPending = false;
-const LOGIN_WAIT_MS = 180000; // 扫码最长等待 3 分钟
+// v3.4：内存登录位——登录成功后置 true（/health 即时返回 loggedIn，无需启动/导航浏览器）；
+// 进程重启后由启动预检重新探测。
+let _loggedIn = false;
+const LOGIN_WAIT_MS = 300000; // 登录最长等待 5 分钟
+const LOGIN_POLL_MS = 3000;   // v3.4：每 3 秒主动轮询一次所有标签页 URL
 
 /**
  * 统一登录流程（自动适配浏览器会话模式）：
@@ -656,7 +668,7 @@ async function runLogin(signal) {
     let work = loggedPage;
     try {
       const u = (() => { try { return work.url() || ''; } catch (_) { return ''; } })();
-      if (!(/xingtu\.cn/.test(u) && /\/ad\//.test(u))) {
+      if (!isLoggedInUrl(u)) {
         await work.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
         await work.waitForTimeout(2500).catch(() => {});
       }
@@ -667,22 +679,49 @@ async function runLogin(signal) {
     _qr = { status: 'loggedin', qrDataUrl: null, updatedAt: Date.now() };
   };
 
-  // 遍历所有标签页，任一已登录即返回该页
+  // v3.4：枚举浏览器【全部上下文】（CDP 下可能含默认上下文之外的目标），
+  // 供标签页扫描使用；兜底至少包含会话主上下文。
+  const allContexts = () => {
+    const out = [];
+    try { if (sess.browser && typeof sess.browser.contexts === 'function') out.push(...sess.browser.contexts()); } catch (_) {}
+    if (sess.context && !out.includes(sess.context)) out.push(sess.context);
+    return out;
+  };
+
+  // v3.4：每 3 秒主动轮询——遍历所有上下文的所有标签页，【只看 URL、不读页面内容】：
+  // 任一标签页落在 xingtu.cn 的 /ad/ 创作者区域即判定登录成功。
   const findLoggedInPage = async () => {
-    const pages = sess.context.pages ? sess.context.pages() : [];
-    for (const pg of pages) {
-      try {
-        if (!pg || pg.isClosed()) continue;
-        if (await checkLoggedIn(pg)) return pg;
-      } catch (_) { /* 页面跳转中，下轮再测 */ }
+    for (const ctx of allContexts()) {
+      let pages = [];
+      try { pages = (ctx && typeof ctx.pages === 'function') ? ctx.pages() : []; } catch (_) { continue; }
+      for (const pg of pages) {
+        try {
+          if (!pg || pg.isClosed()) continue;
+          if (isLoggedInUrl(pg.url() || '')) return pg;
+        } catch (_) { /* 页面跳转中，下轮再测 */ }
+      }
     }
     return null;
   };
 
-  // 已登录快速返回（任一标签页在 /ad/ 广场区域）
+  // v3.4：登录成功后关闭可见浏览器窗口（仅 CDP 模式；无头模式无窗口、保留供打标）。
+  // 登录态已持久化在 .xc-chrome-profile 配置目录（重开免登录）+ Cookie 备份文件。
+  const closeLoginBrowser = async () => {
+    if (sess.mode !== 'cdp') return;
+    try { await sess.browser.close(); } catch (_) { /* CDP Browser.close，关闭整个浏览器 */ }
+    try { if (sess.proc && !sess.proc.killed) sess.proc.kill(); } catch (_) { /* 兜底杀进程 */ }
+    await sleep(1200);
+    if (_session === sess) _session = null;
+    sess._workPage = null;
+    console.log('🪟 登录窗口已自动关闭（登录态已保存在本机，打标时会在后台自动重开浏览器）。');
+  };
+
+  // 已登录快速返回（任一标签页在 /ad/ 创作者区域）。此路径说明登录态此前已建立，
+  // 保留现有浏览器会话供打标直接复用，不关窗、不重开。
   let already = await findLoggedInPage();
   if (already) {
     await finishLogin(already);
+    _loggedIn = true;
     return { ok: true, loggedIn: true, mode: sess.mode, browserName: sess.browserName, message: '已是登录状态' };
   }
 
@@ -703,7 +742,7 @@ async function runLogin(signal) {
       if (!/sso\.oceanengine\.com|\/ad\//.test(u)) await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
       await page.bringToFront();
     } catch (_) { /* 导航失败也让用户在可见窗口里手动操作 */ }
-    console.log('🟢 请在已打开的 ' + sess.browserName + ' 窗口中登录巨量星图（可抖音扫码或手机验证码）…');
+    console.log('🟢 请在已打开的 ' + sess.browserName + ' 窗口中登录巨量星图（可抖音扫码或账号密码/手机验证码登录）…');
   } else {
     console.log('🟢 无头模式：正在打开抖音扫码登录，请在工作台网页用手机抖音 App 扫码…');
     _qr = { status: 'starting', qrDataUrl: null, updatedAt: Date.now() };
@@ -729,19 +768,28 @@ async function runLogin(signal) {
         lastReload = Date.now();
       }
     }
-    // ① 所有标签页里找已登录的
+    // ① 所有上下文的所有标签页里找已登录的（纯 URL 判定）
     let loggedPage = await findLoggedInPage();
     // ② CDP 落地页复核：某标签已到 xingtu.cn 但不在 /ad/（营销首页/角色页等），
-    //    导航工作页到达人广场——已登录会渲染广场，未登录会被踢回 SSO。每 8 秒最多一次。
+    //    导航该页到达人广场——已登录会渲染广场（URL 留在 /ad/），未登录会被踢回 SSO。
+    //    每 8 秒最多一次，避免打断用户正在操作的登录页（SSO/护照页不导航）。
     if (!loggedPage && sess.mode === 'cdp' && Date.now() - lastSquareCheck > 8000) {
       lastSquareCheck = Date.now();
-      const landing = (sess.context.pages ? sess.context.pages() : []).find(p => {
-        try {
-          if (!p || p.isClosed()) return false;
-          const u = p.url() || '';
-          return /xingtu\.cn/.test(u) && !/\/ad\//.test(u) && !/redirect_uri|passport|sso|login/i.test(u);
-        } catch (_) { return false; }
-      });
+      let landing = null;
+      for (const ctx of allContexts()) {
+        let pages = [];
+        try { pages = (ctx && typeof ctx.pages === 'function') ? ctx.pages() : []; } catch (_) { continue; }
+        landing = pages.find(p => {
+          try {
+            if (!p || p.isClosed()) return false;
+            const u = p.url() || '';
+            // 星图域名下、尚未进入 /ad/ 创作者区、且不在 SSO/护照/登录链路 → 落地页，导航到广场复核
+            return /xingtu\.cn/i.test(u) && !isLoggedInUrl(u) &&
+              !/sso\.oceanengine\.com|passport|redirect_uri=|\/(sso|login)(?:\/|$)/i.test(u);
+          } catch (_) { return false; }
+        }) || null;
+        if (landing) break;
+      }
       if (landing) {
         try {
           await landing.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -752,16 +800,25 @@ async function runLogin(signal) {
     }
     if (loggedPage) {
       await finishLogin(loggedPage);
+      _loggedIn = true;
       console.log('✅ 登录成功，Cookie 已备份到 .xc-cookies.json。');
-      return { ok: true, loggedIn: true, mode: sess.mode, browserName: sess.browserName, message: '登录成功' };
+      // v3.4：CDP 模式登录成功后自动关闭浏览器窗口（无头模式无窗口，保留供打标）
+      await closeLoginBrowser();
+      return {
+        ok: true, loggedIn: true, mode: sess.mode, browserName: sess.browserName,
+        windowClosed: sess.mode === 'cdp',
+        message: sess.mode === 'cdp'
+          ? '登录成功，浏览器窗口已自动关闭（打标时会在后台自动重开，无需再操作）。'
+          : '登录成功',
+      };
     }
-    await sleep(2200);
+    await sleep(LOGIN_POLL_MS);
   }
   return {
     ok: false, loggedIn: false, mode: sess.mode,
     message: sess.mode === 'headless'
-      ? '登录超时（3 分钟未扫码成功）：请用手机抖音 App 扫描网页上的二维码后重试。'
-      : '登录超时（3 分钟未检测到登录成功）：请在打开的浏览器窗口里完成巨量星图扫码后重试。',
+      ? '登录超时（5 分钟未扫码成功）：请用手机抖音 App 扫描网页上的二维码后重试。'
+      : '登录超时（5 分钟未检测到登录成功）：请在打开的浏览器窗口里完成巨量星图登录（扫码或账号密码）后重试。',
   };
 }
 
@@ -1038,27 +1095,44 @@ function startServer() {
   app.use(express.raw({ type: () => true, limit: '15mb' })); // 接收上传文件原始字节
 
   // 健康检查 / 登录状态 / 浏览器模式
+  // v3.4：不在 /health 里导航浏览器（前端每 2.5s 轮询，sessionWorkPage 会反复 goto 广场）。
+  // 登录态来源：①内存登录位 _loggedIn（登录成功即置位）；②对【已存活】会话做零副作用
+  // URL 扫描（只遍历所有上下文所有标签页的 URL，不 evaluate、不导航），命中 xingtu.cn/ad/
+  // 也置位。登录成功后 CDP 浏览器已关闭、_session 为 null，此时靠内存位返回已登录。
   app.get('/health', async (_req, res) => {
-    let loggedIn = false;
+    let loggedIn = !!_loggedIn;
     let browserInfo = { mode: null, ready: false, name: '', cdpPort: null };
     try {
       if (_session && await sessionAlive(_session)) {
         browserInfo = { mode: _session.mode, ready: true, name: _session.browserName, cdpPort: _session.cdpPort || null };
-        const page = await sessionWorkPage(_session);
-        loggedIn = await checkLoggedIn(page);
+        if (!loggedIn) {
+          let ctxs = [];
+          try { ctxs = (_session.browser && typeof _session.browser.contexts === 'function') ? _session.browser.contexts() : []; } catch (_) { ctxs = []; }
+          if (!ctxs.includes(_session.context)) ctxs.push(_session.context);
+          outer: for (const ctx of ctxs) {
+            let pages = [];
+            try { pages = (ctx && typeof ctx.pages === 'function') ? ctx.pages() : []; } catch (_) { continue; }
+            for (const pg of pages) {
+              try {
+                if (pg && !pg.isClosed() && isLoggedInUrl(pg.url() || '')) { loggedIn = true; break outer; }
+              } catch (_) { /* 跳转中，下轮再测 */ }
+            }
+          }
+        }
       }
-    } catch (_) { /* 探测失败按未登录处理 */ }
+    } catch (_) { /* 探测失败按未就绪处理 */ }
+    if (loggedIn) _loggedIn = true;
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.3.0', port: PORT,
+      ok: true, loggedIn, version: '3.4.0', port: PORT,
       loginUrl: SQUARE_URL,
       cookiesFile: '.xc-cookies.json',
       cookieCount,
       loginPending: _loginPending,
       browser: browserInfo,
       loginNote: loggedIn ? '' :
-        '请点工作台「🚀 登录星图」按钮：工具会自动打开系统 Chrome/Edge 窗口扫码；' +
-        '若电脑无可用浏览器，则在网页上显示二维码，用手机抖音 App 扫码登录。',
+        '请点工作台「🚀 登录星图」按钮：工具会自动打开系统 Chrome/Edge 窗口，扫码或账号密码登录均可，' +
+        '登录成功后窗口会自动关闭；若电脑禁止弹窗，则在网页上显示二维码，用手机抖音 App 扫码登录。',
     });
   });
 
@@ -1077,13 +1151,14 @@ function startServer() {
     });
   });
 
-  // 扫码登录：POST /login
+  // 登录：POST /login
   // - 自动启动/复用浏览器会话（CDP 系统浏览器优先，无头扫码兜底）；
-  // - 每 2.2 秒检测一次登录态，最多等 180 秒；
+  // - 每 3 秒主动轮询所有上下文所有标签页的 URL（纯 URL 判定，不读页面内容），最多等 5 分钟；
+  // - CDP 模式检测到登录成功后自动关闭浏览器窗口（登录态在配置目录，打标时后台自动重开）；
   // - 前端取消（请求中断）/ 浏览器断开 / 超时，都会中止并返回中文提示。
   app.post('/login', async (req, res) => {
     if (_loginPending) {
-      return res.status(409).json({ ok: false, pending: true, error: '已有登录任务在等待扫码，请完成登录或取消后重试' });
+      return res.status(409).json({ ok: false, pending: true, error: '已有登录任务在等待中，请完成登录或取消后重试' });
     }
     let aborted = false;
     req.on('close', () => { aborted = true; }); // 前端点「取消」或离开页面
@@ -1095,7 +1170,7 @@ function startServer() {
       }
       res.json({
         ok: !!r.ok, loggedIn: !!r.loggedIn, pending: false, cancelled: !!r.cancelled,
-        mode: r.mode || null, browserName: r.browserName || '',
+        mode: r.mode || null, browserName: r.browserName || '', windowClosed: !!r.windowClosed,
         message: r.message || (r.ok ? '登录成功' : '登录失败，请重试'),
       });
     } catch (e) {
@@ -1138,9 +1213,10 @@ function startServer() {
           ok: false, loggedIn: false, mode: sess.mode,
           error: sess.mode === 'headless'
             ? '星图未登录：请点工作台「🚀 登录星图」按钮，用手机抖音 App 扫描网页上显示的二维码登录后再打标'
-            : '星图未登录：请点工作台「🚀 登录星图」按钮，在自动打开的 Chrome/Edge 窗口里扫码登录后再打标',
+            : '星图未登录：请点工作台「🚀 登录星图」按钮，在自动打开的 Chrome/Edge 窗口里扫码或账号密码登录（成功后窗口会自动关闭）后再打标',
         });
       }
+      _loggedIn = true;
 
       const results = [];
       // 1) 先按 ID 批量取（50/批）
@@ -1189,15 +1265,16 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.3.0');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.4.0');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
     console.log('  使用 3 步：');
     console.log('   1) 保持本窗口打开；');
     console.log('   2) 在工作台网页点「🚀 登录星图」——工具会自动打开系统');
-    console.log('      Chrome/Edge 窗口扫码；若无可用浏览器，网页会显示二维码，');
-    console.log('      用手机抖音 App 扫码登录（登录态保存在本机，仅需一次）；');
+    console.log('      Chrome/Edge 窗口，扫码或账号密码登录均可，登录成功后');
+    console.log('      窗口会自动关闭（登录态保存在本机，仅需一次）；若电脑');
+    console.log('      禁止弹窗，网页会显示二维码，用手机抖音 App 扫码登录；');
     console.log('   3) 上传达人名单 Excel，点「开始打标」等待结果。');
     console.log('==================================================\n');
     // 启动后自动准备浏览器会话（CDP 模式会自动打开 Chrome/Edge 窗口）
@@ -1205,9 +1282,10 @@ function startServer() {
       acquireSession().then(async (sess) => {
         const page = await sessionWorkPage(sess);
         const in_ = await checkLoggedIn(page);
+        if (in_) _loggedIn = true;
         console.log(in_
           ? `✅ 检测到星图登录态有效，可直接使用（浏览器：${sess.browserName}）。\n`
-          : `ℹ️  尚未登录：请到工作台点「🚀 登录星图」扫码（当前浏览器：${sess.browserName}）。\n`);
+          : `ℹ️  尚未登录：请到工作台点「🚀 登录星图」，在弹出的浏览器窗口里扫码或账号密码登录（当前浏览器：${sess.browserName}）。\n`);
       }).catch(e => console.log('⚠️  浏览器自动启动失败：' + friendlyErr(e) + '\n   点「登录星图」时会自动重试。\n'));
     }, 800);
   });
@@ -1223,6 +1301,7 @@ module.exports = {
   pickFreePort,
   netTcpPortFree,
   checkLoggedIn,
+  isLoggedInUrl,
   captureLoginQr,
   connectExistingCdp,
   cdpProbeOnce,
@@ -1237,6 +1316,8 @@ module.exports = {
   CHROME_PROFILE_DIR,
   SQUARE_URL,
   LOGIN_URL,
+  LOGIN_WAIT_MS,
+  LOGIN_POLL_MS,
 };
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
