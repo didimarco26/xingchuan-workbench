@@ -22,16 +22,34 @@
 
 'use strict';
 
+const path = require('path');
+
+// 启动防御（必须早于任何外部依赖 require）：工具所在路径含空格/括号时，
+// Chromium --user-data-dir 会解析失败、浏览器启动即退出（has been closed），登录态无法保存。
+// 正常双击启动脚本会先自动迁移到干净路径；走到这里说明是在坏路径里直接命令行运行的。
+if (/[ ()]/.test(__dirname)) {
+  console.error('\n==================================================');
+  console.error('[ERROR] 工具所在文件夹路径含空格或括号：');
+  console.error('  ' + __dirname);
+  console.error('该路径下 Chromium 无法启动，星图登录态也无法保存。');
+  console.error('请双击 start-xc-tagger.command（Mac）/ start-xc-tagger.bat（Windows）启动，');
+  console.error('启动脚本会自动把工具复制到干净路径（如 ~/xc-tagger 或 C:\\xc-tagger）；');
+  console.error('或手动把整个 xc-tagger 文件夹移动到不含空格/括号的路径后重试。');
+  console.error('==================================================\n');
+  process.exit(2);
+}
+
 const express = require('express');
 const cors = require('cors');
 const XLSX = require('xlsx');
-const path = require('path');
 const fs = require('fs');
 
 // ---- 配置 ----------------------------------------------------------------
 const PORT = 7842;
 const HOST = '127.0.0.1';
-const PROFILE_DIR = path.join(__dirname, '.xc-chrome-profile');
+// Profile 目录：必须是绝对路径。含空格/括号的路径会让 Chromium --user-data-dir 解析失败、
+// 浏览器启动即退出（launchPersistentContext: Target page, context or browser has been closed）。
+const PROFILE_DIR = path.resolve(__dirname, '.xc-chrome-profile');
 // 巨量星图 · 达人广场（广告主侧）。抓取接口与该页同源(www.xingtu.cn)，天然带 Cookie。
 const XINGTU_ORIGIN = 'https://www.xingtu.cn';
 const SQUARE_URL = 'https://www.xingtu.cn/ad/creator/square';
@@ -307,8 +325,9 @@ function parseListBuffer(buf, filename) {
   if (!rows.length) return { items: [], headers: [] };
   const headers = Object.keys(rows[0]);
   const idKey = headers.find(h => /id|达人id|星图id|uid|编号/i.test(h));
-  const nameKey = headers.find(h => /昵称|名字|达人名|账号名|name|主播|达人/i.test(h)) ||
-    headers.find(h => !idKey || h !== idKey);
+  // 昵称列：跳过 ID 列（「星图达人ID」也含「达人」二字，不能误选）
+  const nameKey = headers.find(h => h !== idKey && /昵称|名字|达人名|账号名|name|主播|达人/i.test(h)) ||
+    headers.find(h => h !== idKey);
   const items = [];
   rows.forEach((r, i) => {
     let id = idKey ? normText(r[idKey]) : '';
@@ -440,7 +459,7 @@ function startServer() {
     ensureBrowser().then(async (page) => {
       const in_ = await checkLoggedIn(page);
       console.log(in_ ? '✅ 检测到星图已登录，可直接使用。\n' : '⚠️  未检测到登录，请在弹出的 Chrome 窗口扫码登录星图。\n');
-    }).catch(e => console.log('⚠️  浏览器启动失败：' + friendlyErr(e) + '\n   若提示缺少浏览器，请运行：npx playwright install chromium\n'));
+    }).catch(e => console.log('⚠️  浏览器启动失败：' + friendlyErr(e) + '\n   若提示缺少浏览器，请运行：npx playwright install chromium\n   若提示 "has been closed"，请确认 xc-tagger 文件夹路径不含空格/括号（建议 ~/xc-tagger 或 C:\\xc-tagger）。\n'));
   });
 }
 
