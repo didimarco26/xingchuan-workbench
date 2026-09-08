@@ -30,7 +30,11 @@ if not exist node_modules (
     )
 )
 
-rem 3) Start the tool
+rem 3) Ensure Playwright Chromium browser (idempotent; ~150MB download on first run, skipped when installed)
+echo Checking Playwright browser...
+call npx playwright install chromium
+
+rem 4) Start the tool
 echo.
 echo Starting xc-tagger on http://127.0.0.1:7842 ...
 echo Keep this window open while using the tool. Close the window to stop.
