@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.6.2
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.7.0
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，它会：
  *   1) 在 127.0.0.1:7842 起一个本地 HTTP 服务（只监听本机，不对外）；
@@ -21,8 +21,11 @@
  *        普通星图账号下会被重定向导致「未检索到」），拦截主页 XHR/fetch
  *        响应（拦截不到则降级解析 DOM），一次拿到达人资料（星川等级 S0-S5
  *        / 交付项目数 / 星图消耗 / 电商等级 / 粉丝数 / 内容主题标签）与
- *        【前三个视频】的标题/播放/点赞/内容形式，输出 videoAnalysis；
- *        视频标题反哺 forms/persona/industry 标签（只补充不覆盖）；
+ *        【前三个视频】的标题/链接/播放/点赞/内容形式，输出 videoAnalysis；
+ *        视频标题反哺五大受控标签（人设/内容形式/画面风格/拍摄场景/行业，只补不覆盖）；
+ *      · v3.7.0 输出完整达人标签体系：达人人设 / 内容形式 / 画面风格 / 拍摄场景 /
+ *        行业 5 大多选标签（对齐存量达人表字段），并新增 视频链接1-3、主要带货类目、
+ *        近期爆款内容方向、打标置信度（高/中/低）字段，支持导出/回填存量达人库；
  *      · 主页打不开（ID 无效 / 达人未入驻星图 / 被重定向）才降级到达人广场
  *        （v3.6.1 起广场页为 /pro/ad/pages/market）用昵称/ID 搜索兜底；
  *        两条路都失败才报「未检索到」；
@@ -902,6 +905,10 @@ const STOCK_PERSONA_RULES = [
   ['专业测评达人', /测评|评测|开箱|体验|实验|实测/],
   ['女性种草达人', /种草|爱用物|好物分享|好物推荐/],
   ['生活好物推荐官', /生活好物|生活技巧|生活小窍|实用好物/],
+  // v3.7.0 补齐存量库人设字段剩余三个可选值
+  ['高潜带货达人', /带货|爆款|出单|转化|小黄车|橱窗|热销|卖爆/],
+  ['素人真实分享', /素人|真实分享|无广|自用分享|亲测|随手拍|普通人/],
+  ['垂类达人', /垂类|垂直领域|深耕|专注(?!力)/],
 ];
 const STOCK_FORM_RULES = [
   ['好物评测', /评测|测评/],
@@ -914,6 +921,32 @@ const STOCK_FORM_RULES = [
   ['直播切片', /直播/],
   ['产品种草', /种草/],
   ['生活记录', /生活|vlog|日常|记录/],
+];
+// v3.7.0 新增：画面风格标签（存量库多选字段，10 个固定选项；依据视频标题/内容主题推断）
+const STOCK_STYLE_RULES = [
+  ['真人出镜', /真人出镜|本人出镜|出镜|博主本人|露脸/],
+  ['口播字幕', /口播|字幕|讲解|解说|配音|旁白/],
+  ['测评实验感', /测评|评测|实测|实验|测试|横评|数据|检测/],
+  ['剧情化镜头', /剧情|情景剧|段子|反转|演绎|分镜/],
+  ['实拍近景', /实拍|近景|第一视角|第一人称|沉浸式|近距离|特写拍摄/],
+  ['产品特写', /特写|细节|质地|上手|质感|微距/],
+  ['前后对比', /前后对比|对比图|before|after|变化|逆袭|七天|一个月/],
+  ['生活化自然光', /自然光|生活化|日常感|居家拍|vlog感|生活记录/],
+  ['高饱和展示', /高饱和|鲜艳|高颜值|ins风|高级感|大片|色彩/],
+  ['简洁干净', /极简|简洁|干净|白底|纯色背景|简约/],
+];
+// v3.7.0 新增：拍摄场景标签（存量库多选字段，10 个固定选项）
+const STOCK_SCENE_RULES = [
+  ['美妆护肤', /化妆台|化妆间|妆容|护肤|美妆|上脸|试色|梳妆台/],
+  ['服饰穿搭', /试衣间|穿搭|试穿|ootd|换装|衣帽间/],
+  ['厨房餐桌', /厨房|餐桌|做饭|料理|烹饪|烘焙|美食制作/],
+  ['居家场景', /客厅|卧室|房间|家里|居家|书房|沙发/],
+  ['浴室洗护', /浴室|洗澡|沐浴|洗护|洗发水|身体乳|卫生间/],
+  ['户外出行', /户外|街拍|出行|旅行|外景|公园|路边/],
+  ['办公室通勤', /办公室|通勤|职场|工位|上班/],
+  ['母婴亲子', /母婴|亲子|宝宝|育儿|带娃|儿童房/],
+  ['宠物互动', /宠物|撸猫|遛狗|萌宠|猫舍|狗/],
+  ['货架/橱窗展示', /橱窗|货架|柜台|门店|店铺|陈列|直播间|专柜/],
 ];
 const STOCK_INDUSTRY_RULES = [
   ['美妆', /美妆|彩妆|口红|面膜|香水|粉底/],
@@ -979,7 +1012,10 @@ function mapAuthor(raw) {
   const persona = matchControlled(evidence, STOCK_PERSONA_RULES, 3);
   const forms = matchControlled(evidence, STOCK_FORM_RULES, 4);
   const industry = matchControlled(evidence, STOCK_INDUSTRY_RULES, 2);
-  return { id, name, fans, fansTier, sLevel, lLevel, deliveries, consumption, persona, forms, industry, category, raw };
+  // v3.7.0：画面风格 / 拍摄场景标签（同样映射存量库受控词表，主页资料信号弱时可留空，后续视频反哺）
+  const style = matchControlled(evidence, STOCK_STYLE_RULES, 3);
+  const scene = matchControlled(evidence, STOCK_SCENE_RULES, 3);
+  return { id, name, fans, fansTier, sLevel, lLevel, deliveries, consumption, persona, forms, style, scene, industry, category, raw };
 }
 
 // 按昵称搜索达人
@@ -1090,6 +1126,17 @@ function videoIsSelling(v) {
   return !!(v && (v.hasProduct || (v.title && VIDEO_SELL_KW.test(v.title))));
 }
 
+// v3.7.0：由视频 ID / 分享字段拼出可点击视频链接（星图作品即抖音视频，优先抖音视频页；
+// 有显式 share_url / href 时优先归一化使用）。
+function buildVideoUrl(id, explicit) {
+  const s = String(explicit || '').trim();
+  if (/^https?:\/\//i.test(s)) return s;
+  if (/^\/\//.test(s)) return 'https:' + s;
+  const vid = String(id || '').trim();
+  if (/^\d{6,}$/.test(vid)) return `https://www.douyin.com/video/${vid}`;
+  return '';
+}
+
 // 深度遍历星图接口 JSON，收集“像视频/作品”的对象（宽松匹配，字段名待真机校准）
 function deepCollectVideos(node, out, depth) {
   if (!node || depth > 10 || out.length >= 15) return;
@@ -1110,7 +1157,11 @@ function deepCollectVideos(node, out, depth) {
         node.with_goods || node.shop_goods || node.ecommerce_info || node.product_related ||
         node.anchor_info || node.promotions || node.channels ||
         (node.video && (node.video.product || node.video.goods || node.video.product_info)));
-      out.push({ id: String(vid || ''), title: title.slice(0, 80), plays, likes, hasProduct });
+      // v3.7.0：带出视频链接（share_url / share_link / 播放地址；兜底按抖音 ID 拼）
+      const shareUrl = node.share_url ?? node.share_link ?? node.share_url_link ?? node.play_url ??
+        node.aweme_url ?? node.video_url ?? node.url ??
+        (node.video && (node.video.share_url || node.video.play_url)) ?? '';
+      out.push({ id: String(vid || ''), url: buildVideoUrl(vid, shareUrl), title: title.slice(0, 80), plays, likes, hasProduct });
     }
     for (const k of Object.keys(node)) {
       const v = node[k];
@@ -1236,6 +1287,8 @@ function parseDomProfile(state, authorId) {
   const persona = matchControlled(evidence, STOCK_PERSONA_RULES, 2);
   const forms = matchControlled(evidence, STOCK_FORM_RULES, 2);
   const industry = matchControlled(evidence, STOCK_INDUSTRY_RULES, 1);
+  const style = matchControlled(evidence, STOCK_STYLE_RULES, 2);
+  const scene = matchControlled(evidence, STOCK_SCENE_RULES, 2);
   const name = normText(state.name).slice(0, 40);
   const hasSignal = fans > 0 || !!sLevel || deliveries > 0 || consumption > 0 || chips.length >= 3;
   if (!hasSignal) return null;
@@ -1245,7 +1298,7 @@ function parseDomProfile(state, authorId) {
     fans,
     fansTier: fansTierOf(fans),
     sLevel, lLevel, deliveries, consumption,
-    persona, forms, industry,
+    persona, forms, style, scene, industry,
     category: chips[0] ? String(chips[0]).slice(0, 20) : '',
     raw: { _dom: true, chips: chips.slice(0, 20), headText: text.slice(0, 500) },
   };
@@ -1295,6 +1348,8 @@ function mergeAuth(base, extra) {
   out.fansTier = fansTierOf(out.fans || 0);
   out.persona = union(base.persona, extra.persona);
   out.forms = union(base.forms, extra.forms);
+  out.style = union(base.style, extra.style);   // v3.7.0 画面风格
+  out.scene = union(base.scene, extra.scene);   // v3.7.0 拍摄场景
   out.industry = union(base.industry, extra.industry);
   out.raw = extra.raw || base.raw;
   return out;
@@ -1402,7 +1457,7 @@ async function fetchCreatorHome(page, authorId, { debug = false } = {}) {
           .replace(/\s+/g, ' ').trim().slice(0, 60);
         const pm = c.text.match(/(\d+(?:\.\d+)?)\s*(亿|万|[wW])?\s*(次播放|播放|次观看)/);
         return {
-          id: '', title: title || '',
+          id: '', url: buildVideoUrl('', c.href), title: title || '',
           plays: pm ? parseMediaCount(pm[0]) : 0, likes: 0,
           hasProduct: /同款|链接|下单|到手|橱窗|好物|种草|购买|小黄车|价格|划算|直播|带货|优惠/.test(c.text),
           fromDom: true,
@@ -1411,6 +1466,7 @@ async function fetchCreatorHome(page, authorId, { debug = false } = {}) {
     }
     const videos = vids.slice(0, 3).map((v) => ({
       title: v.title,
+      url: v.url || buildVideoUrl(v.id, ''),
       plays: v.plays || 0,
       likes: v.likes || 0,
       contentType: inferVideoContentType(v.title),
@@ -1427,7 +1483,7 @@ async function fetchCreatorHome(page, authorId, { debug = false } = {}) {
   }
 }
 
-// 用视频标题推断的标签【补充】（不覆盖）达人 forms/persona/industry 受控词
+// 用视频标题/内容形式推断的标签【补充】（不覆盖）达人 forms/persona/industry/style/scene 受控词
 function enrichAuthFromVideos(auth, videos) {
   if (!auth || !Array.isArray(videos) || !videos.length) return;
   const text = videos.map((v) => v.title || '').filter(Boolean).join(' ');
@@ -1436,6 +1492,17 @@ function enrichAuthFromVideos(auth, videos) {
   auth.forms = merge(auth.forms, matchControlled(text, STOCK_FORM_RULES, 2));
   auth.persona = merge(auth.persona, matchControlled(text, STOCK_PERSONA_RULES, 2));
   auth.industry = merge(auth.industry, matchControlled(text, STOCK_INDUSTRY_RULES, 2));
+  // v3.7.0：画面风格 / 拍摄场景主要由视频内容反哺
+  auth.style = merge(auth.style, matchControlled(text, STOCK_STYLE_RULES, 3));
+  auth.scene = merge(auth.scene, matchControlled(text, STOCK_SCENE_RULES, 3));
+  // 内容形式种子：口播/测评类视频天然对应「真人出镜+口播字幕 / 测评实验感」风格
+  const forms = videos.map((v) => v.contentType || '').filter(Boolean);
+  const seedStyle = [];
+  if (forms.includes('口播')) seedStyle.push('真人出镜', '口播字幕');
+  if (forms.includes('测评')) seedStyle.push('测评实验感');
+  if (forms.includes('剧情')) seedStyle.push('剧情化镜头');
+  if (forms.includes('种草')) seedStyle.push('生活化自然光');
+  if (seedStyle.length) auth.style = merge(auth.style, seedStyle);
 }
 
 /**
@@ -1456,6 +1523,53 @@ function scoreVideoBonus(videos) {
   if (list.some((v) => v && (Number(v.plays) || 0) >= 100000)) { bonus += 5; why.push('视频播放量超10万+5'); }
   bonus = Math.min(bonus, 20);
   return { bonus, why };
+}
+
+// v3.7.0：构建达人输出级洞察——视频链接 / 主要带货类目 / 近期爆款内容方向 / 打标置信度。
+// 全部基于已抓到的客观数据推断，证据不足时留空、不臆造。
+function buildCreatorInsights(auth, videos, via) {
+  const vids = Array.isArray(videos) ? videos : [];
+  // ① 前三条视频链接（去空、去重，最多 3 条）
+  const videoLinks = [];
+  for (const v of vids) {
+    const u = (v && v.url) || '';
+    if (u && !videoLinks.includes(u)) videoLinks.push(u);
+    if (videoLinks.length >= 3) break;
+  }
+  // ② 主要带货类目：优先行业受控词第一个；否则用主页 category 文本；再兜底从带货视频标题抽
+  let mainCategory = '';
+  if (Array.isArray(auth.industry) && auth.industry.length) mainCategory = auth.industry[0];
+  else if (auth.category) mainCategory = String(auth.category).slice(0, 12);
+  if (!mainCategory) {
+    const sellTitle = vids.filter(v => v && v.isSelling).map(v => v.title || '').join(' ');
+    const ind = matchControlled(sellTitle, STOCK_INDUSTRY_RULES, 1);
+    if (ind.length) mainCategory = ind[0];
+  }
+  // ③ 近期爆款内容方向：取播放最高的一条视频，按「行业 + 内容形式」概括
+  let hotDirection = '';
+  const ranked = vids.slice().filter(v => v && v.title).sort((a, b) => (b.plays || 0) - (a.plays || 0));
+  if (ranked.length) {
+    const top = ranked[0];
+    const parts = [];
+    const ind = (auth.industry && auth.industry[0]) || '';
+    if (ind) parts.push(ind);
+    if (top.contentType) parts.push({ 测评: '测评', 种草: '种草', 口播: '口播讲解', 剧情: '剧情' }[top.contentType] || top.contentType);
+    const selling = top.isSelling ? '带货' : '';
+    if (selling) parts.push(selling);
+    const dirText = parts.join('·') || '内容创作';
+    const playTxt = top.plays >= 10000 ? `（代表作播放${top.plays >= 100000000 ? (top.plays / 1e8).toFixed(1) + '亿' : top.plays >= 10000 ? (top.plays / 1e4).toFixed(1) + '万' : top.plays}）` : '';
+    hotDirection = `${dirText}${playTxt}`;
+  }
+  // ④ 打标置信度：依据资料来源硬指标与视频丰富度
+  //   高：主页 XHR/DOM 命中且（有星川等级或消耗/交付硬指标）且至少 2 条视频
+  //   中：命中主页且有任一硬指标或至少 1 条视频；或昵称搜索命中且资料较全
+  //   低：仅昵称兜底、无视频、硬指标缺失
+  const hardSignals = (auth.sLevel ? 1 : 0) + (auth.consumption > 0 ? 1 : 0) + (auth.deliveries > 0 ? 1 : 0) + (auth.fans > 0 ? 1 : 0);
+  let confidence = '低';
+  if (/home|xhr|dom/.test(String(via)) && hardSignals >= 2 && vids.length >= 2) confidence = '高';
+  else if ((/home|xhr|dom/.test(String(via)) && (hardSignals >= 1 || vids.length >= 1)) || (hardSignals >= 3)) confidence = '中';
+  else if (vids.length >= 2 && hardSignals >= 1) confidence = '中';
+  return { videoLinks, mainCategory, hotDirection, confidence };
 }
 
 
@@ -1540,7 +1654,7 @@ function startServer() {
     if (loggedIn) _loggedIn = true;
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.6.2', port: PORT,
+      ok: true, loggedIn, version: '3.7.0', port: PORT,
       loginUrl: SUP_URL,
       cookiesFile: '.xc-cookies.json',
       cookieCount,
@@ -1711,7 +1825,10 @@ function startServer() {
         if (!auth) {
           results.push({
             id: it.id || '', name: it.name || '(未命名)', found: false, score: 0, tier: '储备', medal: '⚪',
-            sLevel: '', lLevel: '', deliveries: 0, consumption: 0, tags: ['未检索到'],
+            sLevel: '', lLevel: '', deliveries: 0, consumption: 0, fans: 0, fansTier: '',
+            persona: [], forms: [], style: [], scene: [], industry: [], category: '',
+            videoLinks: [], mainCategory: '', hotDirection: '', confidence: '低',
+            tags: ['未检索到'],
             reason: '未能通过 ID 进入主页，昵称搜索也未命中，请核实达人是否入驻星图',
             dataSource: 'new', videoBonus: 0, videoAnalysis: [],
           });
@@ -1721,16 +1838,29 @@ function startServer() {
         const dataSource = it.src === 'stock' || it.src === 'increment' ? it.src : 'new';
         enrichAuthFromVideos(auth, videoAnalysis);
         const sc = scoreAuthor(auth, { dataSource, videoAnalysis });
+        // v3.7.0：视频链接 / 主要带货类目 / 爆款内容方向 / 置信度
+        const insights = buildCreatorInsights(auth, videoAnalysis, via);
         const reason = sc.reason +
-          (via === 'home' ? '\n获取方式: ID直进达人主页' : '\n获取方式: 昵称搜索兜底');
+          (via === 'home' ? '\n获取方式: ID直进达人主页' : '\n获取方式: 昵称搜索兜底') +
+          (insights.mainCategory ? `\n主要带货类目: ${insights.mainCategory}` : '') +
+          (insights.hotDirection ? `\n近期爆款方向: ${insights.hotDirection}` : '') +
+          ((auth.style || []).length ? `\n画面风格: ${auth.style.join(' ')}` : '') +
+          ((auth.scene || []).length ? `\n拍摄场景: ${auth.scene.join(' ')}` : '') +
+          `\n打标置信度: ${insights.confidence}`;
         results.push({
           id: auth.id || it.id || '', name: auth.name || it.name || '', found: true,
           score: sc.score, tier: sc.tier, medal: sc.medal,
           sLevel: auth.sLevel, lLevel: auth.lLevel,
           deliveries: auth.deliveries, consumption: auth.consumption,
           fans: auth.fans, fansTier: auth.fansTier || '',
-          persona: auth.persona || [], forms: auth.forms || [], industry: auth.industry || [],
+          persona: auth.persona || [], forms: auth.forms || [],
+          style: auth.style || [], scene: auth.scene || [],
+          industry: auth.industry || [],
           category: auth.category || '',
+          videoLinks: insights.videoLinks,
+          mainCategory: insights.mainCategory,
+          hotDirection: insights.hotDirection,
+          confidence: insights.confidence,
           tags: sc.tags, reason,
           dataSource: sc.dataSource, videoBonus: sc.videoBonus, videoAnalysis,
           via,
@@ -1748,7 +1878,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.6.2');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.7.0');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
@@ -1807,6 +1937,10 @@ module.exports = {
   scoreVideoBonus,
   inferVideoContentType,
   videoIsSelling,
+  buildVideoUrl,
+  buildCreatorInsights,
+  STOCK_STYLE_RULES,
+  STOCK_SCENE_RULES,
   parseMediaCount,
   deepCollectVideos,
   enrichAuthFromVideos,
