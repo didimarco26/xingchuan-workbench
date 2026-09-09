@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.8.0
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.8.1
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，它会：
  *   1) 在 127.0.0.1:7842 起一个本地 HTTP 服务（只监听本机，不对外）；
@@ -16,14 +16,19 @@
  *      扫码/账号密码/验证码均可；成功后写 Cookie 备份、CDP 模式自动关闭窗口，
  *      /health 内存登录位即时生效。超时 5 分钟。
  *   4) 打标：POST /tag 时后台自动重开浏览器（同一配置目录免登录）：
- *      · ★ v3.8.0 视频画面多模态打标：进「创作能力」tab 拿到前 3 条视频后，自动
- *        逐个点视频封面、在站内视频弹窗里 seek 抽取 4 张关键帧（每达人最多 12 帧），
- *        上传云端多模态视觉模型逐帧看画面/场景/人物/产品/字幕/口播，按存量达人库
- *        闭集口径产出【达人人设/内容形式/画面风格/拍摄场景/行业】5 大标签 +
+ *      · ★ v3.8.1 视频画面多模态打标（抽帧链路真机校准）：进「创作能力」tab 拿到前 3
+ *        条视频后，自动点「全部视频」卡片封面（真机类名 .content-video-card /
+ *        .video-player-cover），在弹出的 Element UI 视频弹窗（.el-dialog__wrapper 内
+ *        xgplayer）里选中【正在播放】的正片（弹窗会预加载下一条，须按
+ *        .xgplayer-playing/!paused/currentTime 区分），seek 抽 4 张关键帧（每达人最多
+ *        12 帧），上传云端多模态视觉模型逐帧看画面/场景/人物/产品/字幕/口播，按存量
+ *        达人库闭集口径产出【达人人设/内容形式/画面风格/拍摄场景/行业】5 大标签 +
  *        主要带货类目 + 近期爆款内容方向 + 打标置信度（高/中/低）+ AI打标建议，
  *        替代过去仅凭视频标题的启发式推断；画面/场景/类目/置信度以视觉结果为准。
- *        云端为纯无状态视觉推理、不读内部数据；抽帧/云端失败静默降级标题推断，
- *        绝不阻塞打标；可用环境变量 XC_VISION=0 关闭视觉打标；
+ *        v3.8.1 同时新增 /progress 实时进度（前端显示「第 N/M 位」进度条，含抽帧/
+ *        AI 打标阶段）。云端为纯无状态视觉推理、不读内部数据；抽帧/云端失败静默降级
+ *        标题推断，绝不阻塞打标；可用环境变量 XC_VISION=0 关闭视觉打标；
+ *      · v3.8.0 视频画面多模态打标首版（抽帧选择器未经真机校准，v3.8.1 已修正）；
  *      · v3.7.2 主链路为「服务商详情页直达」：直接冷开服务商端达人详情页
  *        /provider/pages/author/douyin/{达人ID}（服务商 /sup/ 会话下整页 goto 不被
  *        重定向，批量稳定；服务商广场点达人昵称打开的就是这个新 tab 页面），落地后点
@@ -509,15 +514,10 @@ async function sessionWorkPage(sess) {
   try { await page.setViewportSize({ width: 1280, height: 860 }); } catch (_) {}
   let url = '';
   try { url = page.url() || ''; } catch (_) {}
-  // 不在星图服务商端 /sup/ 区域（SSO 登录页 / 营销首页 / about:blank）→ 导航到 /sup/ 控制台；
-  // 已登录会直接渲染控制台（URL 留在 /sup/），未登录会被重定向到 SSO（checkLoggedIn 据此判定）。
-  if (!(/xingtu\.cn/.test(url) && /\/sup(?:\/|$)/.test(url))) {
-    try {
-      await page.goto(SUP_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      await page.waitForTimeout(2500); // 等 JS 渲染，避免误判登录态
-    } catch (e) {
-      console.log('⚠️ 打开星图异常（稍后自动重试）：' + friendlyErr(e));
-    }
+  // 不在星图服务商端登录区域（SSO 登录页 / 营销首页 / about:blank）→ 收敛到服务商端控制台；
+  // 已登录会直接渲染（/sup/ 或 /provider/），未登录会被重定向到 SSO（checkLoggedIn 据此判定）。
+  if (!(/xingtu\.cn/.test(url) && /\/(?:sup|provider)(?:\/|$)/.test(url))) {
+    await convergeLoggedInPage(page).catch(() => {});
   } else {
     try { await page.bringToFront(); } catch (_) {}
   }
@@ -649,10 +649,31 @@ function isLoggedInUrl(url) {
   } catch (_) { return false; }
   if (!/(^|\.)xingtu\.cn$/i.test(host)) return false;      // 主机名必须是星图域名（含子域）
   // v3.6.2：登录区域 = 服务商端 /sup/ 段（含控制台首页 /sup/ 与创作者主页 /sup/author/detail/{id}）。
-  // 广告主端 /ad/（含达人广场 /pro/ad/pages/market）不再判为登录成功。
-  if (!/^\/sup(?:\/|$)/i.test(path)) return false;
+  // 广告主端 /ad/（含达人广场 /pro/ad/pages/market）不判为登录成功。
+  // v3.8.1：纯服务商账号访问 /sup/ 会被重定向回营销首页，其控制台实际在服务商端 /provider/
+  // （达人详情 /provider/pages/author/douyin/{id}、广场 /provider/pages/market 都在此段，
+  // 打标数据抓取走的就是 /provider/），故登录态判定同时接受 /sup/ 与 /provider/。
+  if (!/^\/(?:sup|provider)(?:\/|$)/i.test(path)) return false;
   if (/\/(sso|passport|login)(?:\/|$)/i.test(path)) return false; // 仍在登录链路
   return true;
+}
+
+// v3.8.1：把工作页收敛到「登录后可停留」的服务商端页面。先试 /sup/（有达人/广告主角色的
+// 账号落在控制台）；纯服务商账号 /sup/ 会被踢回营销首页，则改导航服务商广场 /provider/
+// （未登录会跳 SSO、登录后直接渲染并停留在 /provider/，可被 isLoggedInUrl 识别）。
+async function convergeLoggedInPage(page) {
+  if (!page) return false;
+  try {
+    await page.goto(SUP_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+    await page.waitForTimeout(2500).catch(() => {});
+    let u = ''; try { u = page.url() || ''; } catch (_) {}
+    if (!isLoggedInUrl(u)) {
+      await page.goto(PROVIDER_MARKET_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      await page.waitForTimeout(2500).catch(() => {});
+    }
+    try { u = page.url() || ''; } catch (_) { u = ''; }
+    return isLoggedInUrl(u);
+  } catch (_) { return false; }
 }
 
 // 页面级判定（供 /tag 等在 sessionWorkPage 导航到广场后调用）：只看该页 URL。
@@ -672,6 +693,9 @@ let _loginPending = false;
 let _loggedIn = false;
 const LOGIN_WAIT_MS = 300000; // 登录最长等待 5 分钟
 const LOGIN_POLL_MS = 3000;   // v3.4：每 3 秒主动轮询一次所有标签页 URL
+
+// v3.8.1：打标实时进度（/tag 处理中由循环更新，前端轮询 /progress 渲染进度条）
+let tagProgress = { running: false, total: 0, done: 0, current: '', phase: '', startedAt: 0 };
 
 /**
  * 统一登录流程（自动适配浏览器会话模式）：
@@ -694,14 +718,13 @@ async function runLogin(signal) {
     return { ok: false, loggedIn: false, needInstall: true, message: friendlyErr(e) };
   }
 
-  // 登录成功收尾：把工作页收敛到服务商端 /sup/ 控制台、回写 Cookie、复位二维码状态
+  // 登录成功收尾：把工作页收敛到服务商端控制台（/sup/ 或 /provider/）、回写 Cookie、复位二维码状态
   const finishLogin = async (loggedPage) => {
     let work = loggedPage;
     try {
       const u = (() => { try { return work.url() || ''; } catch (_) { return ''; } })();
       if (!isLoggedInUrl(u)) {
-        await work.goto(SUP_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-        await work.waitForTimeout(2500).catch(() => {});
+        await convergeLoggedInPage(work).catch(() => {});
       }
     } catch (_) { /* 导航失败不影响登录态判定 */ }
     sess._workPage = work;
@@ -814,7 +837,7 @@ async function runLogin(signal) {
           try {
             if (!p || p.isClosed()) return false;
             const u = p.url() || '';
-            // 星图域名下、尚未进入服务商端 /sup/ 控制台、且不在 SSO/护照/登录链路 → 落地页，导航到 /sup/ 复核
+            // 星图域名下、尚未进入服务商端控制台（/sup/、/provider/）、且不在 SSO/护照/登录链路 → 落地页，导航复核
             return /xingtu\.cn/i.test(u) && !isLoggedInUrl(u) &&
               !/sso\.oceanengine\.com|passport|redirect_uri=|\/(sso|login)(?:\/|$)/i.test(u);
           } catch (_) { return false; }
@@ -823,7 +846,7 @@ async function runLogin(signal) {
       }
       if (landing) {
         try {
-          await landing.goto(SUP_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await convergeLoggedInPage(landing).catch(() => {});
           await landing.waitForTimeout(2500);
           loggedPage = await findLoggedInPage();
         } catch (_) { /* 下轮再试 */ }
@@ -1727,7 +1750,7 @@ async function fetchCreatorHome(page, authorId, { debug = false } = {}) {
     }));
 
     if (debug) console.log(`  🐞 主页抓取(${authorId})：资料来源=${via}，视频=${videos.length}个`);
-    // v3.8.0：在「创作能力」tab 依次点前 3 个视频封面 → 站内视频弹窗里 seek 抽帧，
+    // v3.8.1：在「创作能力」tab 点「全部视频」卡片封面，弹窗播放器里 seek 抽帧，
     // 供云端多模态视觉打标（XC_VISION=0 可关）。抽帧失败静默降级，不影响打分。
     let frameBundles = [];
     const visionOn = process.env.XC_VISION !== '0';
@@ -1749,75 +1772,127 @@ async function fetchCreatorHome(page, authorId, { debug = false } = {}) {
   }
 }
 
-// ---- v3.8.0 视频抽帧：在创作能力 tab 逐个点封面，站内弹窗播放器 seek 截图 ----------
-// 返回 [{ i, frames:[dataURL,...] }]；任一步失败返回已抽到的帧，绝不抛错阻塞打标。
+// ---- v3.8.1 视频抽帧（真机校准版）：创作能力 tab「全部视频」卡片 → el-dialog 弹窗 xgplayer → seek 截图 ----
+// 真机 DOM（服务商详情页 /provider/pages/author/douyin/{id} 创作能力 tab，2026-09 实测）：
+//   视频卡片 .content-video-card → 封面 .video-player-cover.cover-card；点击弹 .el-dialog__wrapper
+//   （Element UI，页面可能预置隐藏 wrapper，须按可见筛选），弹窗内为 xgplayer（.base-player.xgplayer），
+//   <video> 竖版 ~306x544；弹窗常含 2 个 video（当前正片 + 预加载下一条 .xgplayer-nostart），
+//   选「播放中」的（.xgplayer-playing / !paused / currentTime>0）；关闭点 .el-dialog__headerbtn，Esc 兜底。
+// 返回 [{ i, frames:[dataURL,...], title }]；任一步失败返回已抽到的帧，绝不抛错阻塞打标。
 async function captureShowItemFrames(vp, maxVideos = 3, perVideo = 4) {
   const out = [];
-  const clickCover = (idx) => vp.evaluate((idx_) => {
-    const vis = (e) => { try { return e && e.offsetParent !== null && e.offsetWidth >= 150 && e.offsetHeight >= 150; } catch (_) { return false; } };
-    const sels = ['[class*="video-item" i]', '[class*="work-item" i]', '[class*="aweme" i]', '[class*="video-card" i]',
-      '[class*="case-item" i]', '[class*="creative" i][class*="item" i]', '[class*="cover" i]', 'a[href*="video"]', 'a[href*="aweme"]'];
-    let cards = [];
-    for (const s of sels) { cards = Array.from(document.querySelectorAll(s)).filter(vis); if (cards.length >= idx_ + 1) break; }
-    const el = cards[idx_];
-    if (!el) return false;
-    el.scrollIntoView({ block: 'center' });
-    try { el.click(); } catch (_) {}
-    return true;
-  }, idx).catch(() => false);
+  // 逐步滚动，确保「全部视频」卡片懒加载渲染出来
+  await vp.evaluate(async () => {
+    for (const yy of [0.5, 0.75, 0.9]) {
+      window.scrollTo(0, Math.round(document.body.scrollHeight * yy));
+      await new Promise(r => setTimeout(r, 450));
+    }
+  }).catch(() => {});
 
+  const clickCard = (idx) => vp.evaluate((idx_) => {
+    const byCard = () => Array.from(document.querySelectorAll('.content-video-card'));
+    let card = byCard()[idx_];
+    if (!card) {
+      const sels = ['[class*="video-card" i]', '[class*="work-item" i]', '[class*="aweme" i]', '[class*="cover" i]'];
+      for (const s of sels) {
+        const els = Array.from(document.querySelectorAll(s)).filter(e => {
+          const b = e.getBoundingClientRect(); return b.width >= 130 && b.height >= 150;
+        });
+        if (els.length > idx_) { card = els[idx_]; break; }
+      }
+    }
+    if (!card) return { clicked: false };
+    card.scrollIntoView({ block: 'center' });
+    const cover = card.querySelector('.video-player-cover') || card.querySelector('[class*="cover" i]') || card;
+    const title = (card.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    try { cover.click(); return { clicked: true, title }; }
+    catch (e) { return { clicked: false, err: String((e && e.message) || e) }; }
+  }, idx).catch(() => ({ clicked: false }));
+
+  // 在可见弹窗里选中「正在播放」的视频并打 data-xc-vid 标记；避开预加载的下一条
   const markBestVideo = () => vp.evaluate(() => {
-    const vs = Array.from(document.querySelectorAll('video'))
-      .filter(v => v.offsetWidth >= 280 && v.readyState >= 2 && (v.duration || 0) > 1.5);
-    vs.sort((a, b) => (b.offsetWidth * b.offsetHeight) - (a.offsetWidth * a.offsetHeight));
+    const wrappers = Array.from(document.querySelectorAll('.el-dialog__wrapper'))
+      .filter(d => d.offsetHeight > 300 && getComputedStyle(d).display !== 'none');
+    let scope = document;
+    if (wrappers.length) {
+      wrappers.sort((a, b) => b.querySelectorAll('video').length - a.querySelectorAll('video').length);
+      scope = wrappers[0];
+    }
+    const pick = (root) => Array.from(root.querySelectorAll('video'))
+      .filter(v => v.offsetWidth >= 200 && (v.duration || 0) > 1.5 && v.readyState >= 2);
+    let vs = pick(scope);
+    if (!vs.length) vs = pick(document); // 全局兜底
+    if (!vs.length) return { ok: false };
+    vs.sort((a, b) => {
+      const pa = a.closest('.xgplayer') || a.parentElement;
+      const pb = b.closest('.xgplayer') || b.parentElement;
+      const sa = (pa && /xgplayer-playing/.test(pa.className) ? 2000 : 0) + (a.paused ? 0 : 1000) + ((a.currentTime || 0) > 1 ? 500 : 0) + (a.offsetWidth * a.offsetHeight) / 1e6;
+      const sb = (pb && /xgplayer-playing/.test(pb.className) ? 2000 : 0) + (b.paused ? 0 : 1000) + ((b.currentTime || 0) > 1 ? 500 : 0) + (b.offsetWidth * b.offsetHeight) / 1e6;
+      return sb - sa;
+    });
     const v = vs[0];
-    if (!v) return false;
     document.querySelectorAll('video[data-xc-vid]').forEach(x => x.removeAttribute('data-xc-vid'));
     v.setAttribute('data-xc-vid', '1');
-    try { v.muted = true; } catch (_) {}
-    return true;
-  }).catch(() => false);
+    try { v.muted = true; v.removeAttribute('controls'); v.controls = false; } catch (_) {}
+    const playing = /xgplayer-playing/.test(((v.closest('.xgplayer') || v.parentElement) || {}).className || '') || !v.paused || (v.currentTime || 0) > 1;
+    return { ok: true, playing, dur: Math.round((v.duration || 0) * 10) / 10 };
+  }).catch(() => ({ ok: false }));
 
-  const closeModal = async () => {
+  const closeDialog = async () => {
     await vp.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('[class*="close" i],[aria-label*="close" i],button,span,div'));
-      const c = btns.find(b => b.offsetParent !== null &&
-        (/close|关闭|modal|dialog|mask/i.test(b.className || '') || /^(关闭|×|✕|X|x)$/.test((b.innerText || '').trim())));
-      if (c) try { c.click(); } catch (_) {}
+      const dlg = Array.from(document.querySelectorAll('.el-dialog__wrapper'))
+        .find(d => d.offsetHeight > 300 && getComputedStyle(d).display !== 'none');
+      if (!dlg) return;
+      const btn = dlg.querySelector('.el-dialog__headerbtn') || dlg.querySelector('.el-dialog__close') || dlg.querySelector('[class*="close" i]');
+      if (btn) { try { btn.click(); } catch (_) {} }
     }).catch(() => {});
     await vp.keyboard.press('Escape').catch(() => {});
-    await vp.waitForTimeout(600).catch(() => {});
+    for (let i = 0; i < 10; i++) {
+      const gone = await vp.evaluate(() => {
+        return !Array.from(document.querySelectorAll('.el-dialog__wrapper'))
+          .some(d => d.offsetHeight > 300 && getComputedStyle(d).display !== 'none');
+      }).catch(() => true);
+      if (gone) return;
+      await vp.waitForTimeout(400).catch(() => {});
+    }
   };
 
   const ratios = perVideo >= 5 ? [0.15, 0.35, 0.55, 0.75, 0.92] : [0.2, 0.45, 0.7, 0.9];
   for (let k = 0; k < maxVideos; k++) {
     try {
-      const clicked = await clickCover(k);
-      if (!clicked) break;
-      await vp.waitForTimeout(2600).catch(() => {});
-      await waitIfCaptcha(vp, 30000);
-      const has = await markBestVideo();
-      if (!has) { await closeModal(); continue; }
+      const clicked = await clickCard(k);
+      if (!clicked || !clicked.clicked) break;
+      // 等弹窗播放器就绪：优先等「播放中」的正片（弹窗会预加载下一条，不能选早了）
+      let marked = { ok: false };
+      for (let w = 0; w < 14; w++) {
+        await vp.waitForTimeout(700).catch(() => {});
+        await waitIfCaptcha(vp, 30000);
+        marked = await markBestVideo();
+        if (marked.ok && marked.playing) break;
+        if (marked.ok && !marked.playing && w >= 8) break; // 约 5.6s 仍未起播，兜底用已就绪视频
+      }
+      if (!marked.ok) { await closeDialog(); continue; }
       const handle = await vp.$('video[data-xc-vid="1"]').catch(() => null);
-      if (!handle) { await closeModal(); continue; }
+      if (!handle) { await closeDialog(); continue; }
       const frames = [];
       for (const r of ratios) {
         const seekOk = await vp.evaluate((rr) => {
           const v = document.querySelector('video[data-xc-vid="1"]');
           if (!v) return false;
-          try { v.currentTime = Math.max(0, rr * Math.max(1, (v.duration || 30) - 0.1)); } catch (_) {}
+          try { v.pause(); v.currentTime = Math.max(0, rr * Math.max(1, (v.duration || 30) - 0.1)); } catch (_) {}
           return true;
         }, r).catch(() => false);
         if (!seekOk) break;
-        await vp.waitForTimeout(900).catch(() => {});
+        await vp.waitForTimeout(1000).catch(() => {});
         try {
-          const buf = await handle.screenshot({ type: 'jpeg', quality: 52 });
+          const buf = await handle.screenshot({ type: 'jpeg', quality: 55 });
           if (buf && buf.length) frames.push('data:image/jpeg;base64,' + buf.toString('base64'));
         } catch (_) {}
       }
-      await closeModal();
-      if (frames.length) out.push({ i: k, frames });
-    } catch (_) { await closeModal().catch(() => {}); }
+      await closeDialog();
+      await vp.waitForTimeout(500).catch(() => {});
+      if (frames.length) out.push({ i: k, frames, title: clicked.title || '' });
+    } catch (_) { await closeDialog().catch(() => {}); }
   }
   return out;
 }
@@ -2070,7 +2145,7 @@ function startServer() {
     if (loggedIn) _loggedIn = true;
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.8.0', port: PORT,
+      ok: true, loggedIn, version: '3.8.1', port: PORT,
       loginUrl: SUP_URL,
       marketUrl: PROVIDER_MARKET_URL,
       vision: true,
@@ -2082,6 +2157,11 @@ function startServer() {
         '请点工作台「🚀 登录星图」按钮：工具会自动打开系统 Chrome/Edge 窗口，扫码或账号密码登录均可，' +
         '登录成功后窗口会自动关闭；若电脑禁止弹窗，则在网页上显示二维码，用手机抖音 App 扫码登录。',
     });
+  });
+
+  // v3.8.1：打标实时进度（前端在 /tag 处理期间每秒轮询，渲染「第 N/M 位」进度条）
+  app.get('/progress', (_req, res) => {
+    res.json({ ok: true, ...tagProgress, vision: process.env.XC_VISION !== '0' });
   });
 
   // 登录二维码（无头模式专用）：前端登录等待中每 ~2.5s 轮询
@@ -2190,6 +2270,8 @@ function startServer() {
       const results = [];
       const debugVideo = process.env.XC_TAGGER_DEBUG === '1';
       if (debugVideo) console.log('🐞 XC_TAGGER_DEBUG=1：达人主页抓取将落截图、接口 JSON 与 DOM 状态到 .xc-debug/');
+      // v3.8.1：打标实时进度（前端轮询 /progress）
+      tagProgress = { running: true, total: items.length, done: 0, current: '', phase: '准备', startedAt: Date.now() };
       // v3.6 主链路：① 有 ID 直接进达人主页抓资料+视频；
       //             ② 主页打不开（ID 无效/未入驻/重定向）才用昵称搜达人广场兜底；
       //             ③ 两条路都失败才报「未检索到」。
@@ -2205,7 +2287,11 @@ function startServer() {
         }
         return homeCache.get(key);
       };
-      for (const it of items) {
+      for (let _pi = 0; _pi < items.length; _pi++) {
+        const it = items[_pi];
+        tagProgress.done = _pi;
+        tagProgress.current = it.name || it.id || `第${_pi + 1}位`;
+        tagProgress.phase = '抓取达人主页与视频画面（视频抽帧较慢，请耐心等待）';
         let auth = null;
         let videoAnalysis = [];
         let visionFrames = [];
@@ -2254,6 +2340,7 @@ function startServer() {
             reason: '未能通过 ID 进入主页，昵称搜索也未命中，请核实达人是否入驻星图',
             dataSource: 'new', videoBonus: 0, videoAnalysis: [],
           });
+          tagProgress.done = _pi + 1;
           continue;
         }
         // v3.5：双库口径（名单「来源」列：存量=stock/增量=increment；缺省按新达人 new）
@@ -2263,6 +2350,7 @@ function startServer() {
         // 失败/无帧静默降级到上面的标题推断口径，绝不阻塞打标。
         let visionInfo = null;
         if (Array.isArray(visionFrames) && visionFrames.length) {
+          tagProgress.phase = '视频画面 AI 多模态打标中';
           try {
             const vision = await callVisionTagging(auth, videoAnalysis, visionFrames);
             if (vision) {
@@ -2319,20 +2407,23 @@ function startServer() {
           visionFrameCount: (visionInfo && visionInfo.frameCount) || 0,
           via,
         });
+        tagProgress.done = _pi + 1;
       }
       // 按分降序
       results.sort((a, b) => b.score - a.score);
       const summary = { 标杆: 0, 主力: 0, 潜力: 0, 储备: 0 };
       results.forEach(r => { summary[r.tier] = (summary[r.tier] || 0) + 1; });
+      tagProgress.running = false;
       res.json({ ok: true, loggedIn: true, total: results.length, summary, results });
     } catch (e) {
+      tagProgress.running = false;
       res.status(500).json({ ok: false, error: '打标失败：' + friendlyErr(e) });
     }
   });
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.8.0（视频画面AI打标）');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.8.1（视频画面AI打标·真机校准）');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');

@@ -1,8 +1,8 @@
 {
   "name": "xc-tagger",
-  "version": "3.8.0",
+  "version": "3.8.1",
   "private": true,
-  "description": "星川服务商达人自助打标 · 本地一键工具 v3.8.0（离线包内置 node_modules 解压即用；v3.8.0 视频画面 AI 多模态打标：进达人「创作能力」拿到前 3 条视频后，自动逐个点封面在站内弹窗 seek 抽 4 帧（每达人最多 12 帧），上传云端多模态视觉模型逐帧看画面/场景/人物/产品/字幕/口播，按存量达人库闭集口径产出 5 大标签（人设/内容形式/画面风格/拍摄场景/行业）+主要带货类目+近期爆款内容方向+打标置信度（高/中/低）+AI打标建议，替代过去仅凭标题的启发式推断；云端纯无状态视觉推理不读内部数据，抽帧/云端失败静默降级，XC_VISION=0 可关；v3.7.x 视频链接抓取走服务商端 /provider/pages/author/douyin/{id} 直达创作能力 tab 取 get_author_show_items_v2，广场站内导航兜底，取 item_id 拼抖音链接，滑块验证码等 30 秒手动拖；v3.7.0 五大标签+视频链接+导出/上传我的达人库 CSV；登录检测走服务商端 /sup/；v3.5 双库口径：存量 80 分制、增量/新达人视频加分最多+20 封顶100）",
+  "description": "星川服务商达人自助打标 · 本地一键工具 v3.8.1（离线包内置 node_modules 解压即用；v3.8.1 视频画面 AI 多模态打标抽帧链路真机校准：点「全部视频」卡片封面 .content-video-card/.video-player-cover 弹 Element UI 视频弹窗，选中播放中的 xgplayer 正片 seek 抽帧，新增 /progress 实时进度条「第 N/M 位」；云端 creator_video_tag 多模态逐帧看画面/场景/人物/产品/字幕/口播，按存量达人库闭集产出 5 大标签（人设/内容形式/画面风格/拍摄场景/行业）+主要带货类目+近期爆款内容方向+置信度+AI打标建议，抽帧/云端失败静默降级，XC_VISION=0 可关；v3.7.x 视频链接走服务商端 /provider/pages/author/douyin/{id} 直达创作能力 tab；登录检测走 /sup/）",
   "main": "xc-tagger.js",
   "bin": {
     "xc-tagger": "xc-tagger.js"
