@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.7.0
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.7.1
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，它会：
  *   1) 在 127.0.0.1:7842 起一个本地 HTTP 服务（只监听本机，不对外）；
@@ -16,19 +16,25 @@
  *      扫码/账号密码/验证码均可；成功后写 Cookie 备份、CDP 模式自动关闭窗口，
  *      /health 内存登录位即时生效。超时 5 分钟。
  *   4) 打标：POST /tag 时后台自动重开浏览器（同一配置目录免登录）：
- *      · ★ v3.6 主链路改为「ID 直进达人主页」：直接用名单里的达人 ID 访问
- *        v3.6.1 起为 /sup/author/detail/{id}（旧 /ad/creator/detail/{id} 在
- *        普通星图账号下会被重定向导致「未检索到」），拦截主页 XHR/fetch
- *        响应（拦截不到则降级解析 DOM），一次拿到达人资料（星川等级 S0-S5
- *        / 交付项目数 / 星图消耗 / 电商等级 / 粉丝数 / 内容主题标签）与
- *        【前三个视频】的标题/链接/播放/点赞/内容形式，输出 videoAnalysis；
+ *      · ★ v3.7.2 主链路改为「服务商详情页直达」：直接冷开服务商端达人详情页
+ *        /provider/pages/author/douyin/{达人ID}（服务商 /sup/ 会话下整页 goto 不被
+ *        重定向，批量稳定；服务商广场点达人昵称打开的就是这个新 tab 页面），落地后点
+ *        顶部 el-tabs「创作能力」tab，拦截 /gw/api/author/get_author_show_items_v2，
+ *        取 data.latest_item_info（个人最新 15 条）前 3 条、不足补 latest_star_item_info
+ *        （星图商单视频），按 item_id 拼 https://www.douyin.com/video/{id}；
+ *        遇滑块验证码自动等待最多 30 秒让服务商手动拖过，超时降级空视频、不阻塞；
+ *      · v3.7.2 详情页打不开时依次降级：① 服务商广场站内导航（搜索→点卡片 SPA 跳
+ *        /ad/creator/market/detail/{id}，冷开会被踢到 /ad/creator/index，仅作兜底）；
+ *        ② 冷开 /sup/author/detail/{id} 至少拿达人资料（该页拿不到创作能力视频）；
+ *      · 拦截 XHR/fetch 响应（拦截不到降级解析 DOM），一次拿到达人资料（星川
+ *        等级 S0-S5 / 交付项目数 / 星图消耗 / 电商等级 / 粉丝数 / 内容主题标签）
+ *        与【前三个视频】的标题/链接/播放/点赞/内容形式，输出 videoAnalysis；
  *        视频标题反哺五大受控标签（人设/内容形式/画面风格/拍摄场景/行业，只补不覆盖）；
  *      · v3.7.0 输出完整达人标签体系：达人人设 / 内容形式 / 画面风格 / 拍摄场景 /
  *        行业 5 大多选标签（对齐存量达人表字段），并新增 视频链接1-3、主要带货类目、
  *        近期爆款内容方向、打标置信度（高/中/低）字段，支持导出/回填存量达人库；
- *      · 主页打不开（ID 无效 / 达人未入驻星图 / 被重定向）才降级到达人广场
- *        （v3.6.1 起广场页为 /pro/ad/pages/market）用昵称/ID 搜索兜底；
- *        两条路都失败才报「未检索到」；
+ *      · 达人主页两条路都进不去（ID 无效 / 未入驻星图 / 被重定向）才降级到广场
+ *        用昵称/ID 搜索兜底；
  *      · XC_TAGGER_DEBUG=1 时落截图+接口 JSON+DOM 状态到 .xc-debug/
  *        供真机校准；每达人间隔 800ms 防风控。
  *   5) 评分双库口径：
@@ -76,6 +82,10 @@ const SUP_URL = 'https://www.xingtu.cn/sup/';
 // v3.6.1：达人广场改为新路径 /pro/ad/pages/market（旧 /ad/creator/square 在普通账号下已重定向/失效）。
 // 仅作为昵称搜索兜底页（v3.6.2 起不再用于登录引导/登录态判定）。
 const SQUARE_URL = 'https://www.xingtu.cn/pro/ad/pages/market';
+// v3.7.1：服务商广场（站内搜索达人 → 点卡片 SPA 跳 /ad/creator/market/detail/{id}，
+// 「创作能力」tab 的视频列表 XHR 只在这条站内导航链路下才会触发）。
+// 首选 /provider/pages/market，打不开回退 /pro/ad/pages/market。
+const PROVIDER_MARKET_URL = 'https://www.xingtu.cn/provider/pages/market';
 // 登录直达页（v3.6.2）：直接导航服务商端控制台 /sup/。未登录时星图自动 302 到
 // sso.oceanengine.com 统一登录页（redirect_uri 由星图按服务商端编码，role 正确），
 // 登录成功后回跳 /sup/——天然建立服务商端会话。无头扫码同理：goto 后落在 SSO 页点抖音图标。
@@ -1096,6 +1106,19 @@ function scoreAuthor(auth, opts = {}) {
 // v3.6.1：创作者主页改走 /sup/author/detail/{id}（旧 /ad/creator/detail/{id} 在普通星图账号下
 // 会被重定向到广场/SSO，导致「未检索到」）；XHR 拦截关键字与 DOM 降级解析均与路径无关，自动适用。
 const CREATOR_DETAIL_URL = (id) => `https://www.xingtu.cn/sup/author/detail/${id}`;
+// v3.7.0：星图主页链接（对外展示 / 复制用）。服务商登录后进服务商达人广场，点达人进入的
+// 落地页为市场详情页 /ad/creator/market/detail/{id}，「创作能力」tab 下有该达人作品视频列表。
+// 注意：该路径是 SPA 站内路由——浏览器整页冷 goto 会被星图重定向到 /ad/creator/index（需广告主
+// 资质），只有在服务商广场页上下文里站内跳转才能正常渲染。故抓取主链路仍用 CREATOR_DETAIL_URL
+// （/sup/author/detail，服务商端会话直开）；市场详情页 + 创作能力视频的站内导航抓取待真机校准。
+const MARKET_DETAIL_URL = (id) => `https://www.xingtu.cn/ad/creator/market/detail/${id}`;
+// v3.7.2（实测定稿）：服务商端达人详情页 /provider/pages/author/douyin/{id}。
+// 在服务商 /sup/ 会话下【可整页冷开、不被重定向】（广告主端 /ad/creator/market/detail 冷开会被踢到
+// /ad/creator/index，必须站内 SPA 跳转，批量极不稳定）。服务商达人广场点达人昵称即在新 tab 打开此页。
+// 页内顶部 el-tabs 有「达人概览/商业能力/创作能力/…」；点「创作能力」会拉
+// /gw/api/author/get_author_show_items_v2，data.latest_item_info（个人最新 15 条）+
+// data.latest_star_item_info（星图商单 15 条）即创作能力视频列表。此 URL 同时作为星图主页链接。
+const PROVIDER_AUTHOR_URL = (id) => `https://www.xingtu.cn/provider/pages/author/douyin/${id}`;
 
 // "12.5万"/"1.2亿"/"3w"/纯数字 → 数字
 function parseMediaCount(t) {
@@ -1205,7 +1228,11 @@ function domHomeStateEval() {
   const out = { url: '', onDetail: false, notFound: false, headText: '', chips: [], name: '' };
   try {
     out.url = location.href;
-    out.onDetail = /\/(?:sup\/author|ad\/creator)\/detail\/\d+/.test(out.url);
+    // v3.7.2：onDetail 首选服务商端达人详情页 /provider/pages/author/douyin/{id}（可冷开，主链路）；
+    // 兼容服务商广场站内跳转的市场详情 /ad/creator/market/detail/{id}、/sup/author/detail/{id}、旧 /ad/creator/detail/{id}。
+    out.onDetail = /\/provider\/pages\/author\/douyin\/\d+/.test(out.url) ||
+      /\/ad\/creator\/market\/detail\/\d+/.test(out.url) ||
+      /\/(?:sup\/author|ad\/creator)\/detail\/\d+/.test(out.url);
     const text = (document.body && document.body.innerText || '').replace(/\s+/g, ' ').trim();
     out.headText = text.slice(0, 3000);
     out.notFound = /达人不存在|创作者不存在|达人已注销|账号已注销|页面不存在|找不到相关|未入驻|暂无权限|没有权限|内容不存在|\b404\b/.test(text.slice(0, 1000));
@@ -1355,15 +1382,224 @@ function mergeAuth(base, extra) {
   return out;
 }
 
+// ---- v3.7.1：服务商广场站内导航，进「创作能力」抓视频列表 XHR ----------------
+// 浏览器侧：判断当前是否弹出滑块/安全验证码（需要服务商手动拖）
+function captchaPresentEval() {
+  try {
+    const kw = /拖动|滑块|按住|完成验证|安全验证|向右滑动|拼图|验证码|请完成下方验证/;
+    const vis = (e) => { try { return e && e.offsetParent !== null && e.offsetWidth > 60 && e.offsetHeight > 30; } catch (_) { return false; } };
+    const els = Array.from(document.querySelectorAll('div,span,button,section'));
+    const hit = els.find(e => vis(e) && kw.test((e.innerText || '') + (e.title || '')));
+    const ifr = document.querySelector('iframe[src*="captcha" i],iframe[src*="verify" i],iframe[id*="captcha" i]');
+    return !!(hit || (ifr && vis(ifr)));
+  } catch (_) { return false; }
+}
+// 遇到滑块验证码时最多等 timeoutMs（默认 30s）等服务商手动拖过；验证码消失即返回
+async function waitIfCaptcha(page, timeoutMs = 30000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const has = await page.evaluate(captchaPresentEval).catch(() => false);
+    if (!has) return false;
+    await page.waitForTimeout(1500).catch(() => {});
+  }
+  return true; // 超时仍在验证码
+}
+
 /**
- * v3.6 打标主链路：直接用达人 ID 进入星图创作者主页
- * （v3.6.1：https://www.xingtu.cn/sup/author/detail/{id}；旧 /ad/creator/detail/{id} 普通账号会被重定向），一次访问同时拿到：
+ * v3.7.1 站内导航链路（关键：不能冷开详情页）：
+ *   广场页 → 搜索达人 ID → 站内点达人卡片（SPA 跳 /ad/creator/market/detail/{id}）
+ *   → 点「创作能力」tab → 点前 3 个视频封面触发详情弹窗接口（站内弹窗，URL 不变）。
+ * 全程响应由调用方 vp.on('response') 拦截进 apiHits。任何一步失败都返回 reached:false，
+ * 由调用方降级（不阻塞打标）。
+ */
+async function enterCreatorDetailViaMarket(vp, authorId) {
+  const id = String(authorId || '').trim();
+  if (!id) return { reached: false };
+  // ① 进服务商广场（首选 /provider/pages/market，失败回退 /pro/ad/pages/market）
+  let opened = false;
+  for (const u of [PROVIDER_MARKET_URL, SQUARE_URL]) {
+    try {
+      await vp.goto(u, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await vp.waitForTimeout(2500);
+      await waitIfCaptcha(vp, 30000);
+      const hasSearch = await vp.evaluate(() => {
+        const vis = (e) => { try { return e && e.offsetParent !== null && !e.disabled; } catch (_) { return false; } };
+        return Array.from(document.querySelectorAll('input')).some(i => vis(i));
+      }).catch(() => false);
+      if (hasSearch) { opened = true; break; }
+    } catch (_) { /* 试下一个广场入口 */ }
+  }
+  if (!opened) return { reached: false };
+
+  // ② 搜索框输入达人 ID 并回车
+  const searched = await vp.evaluate((qid) => {
+    const vis = (e) => { try { return e && e.offsetParent !== null && !e.disabled; } catch (_) { return false; } };
+    const inputs = Array.from(document.querySelectorAll('input'));
+    const inp = inputs.find(i => vis(i) && /搜索|达人|昵称|账号|关键词|星图/.test(i.placeholder || '')) ||
+      inputs.find(i => vis(i) && /search/i.test((i.className || '') + (i.getAttribute('aria-label') || ''))) ||
+      inputs.find(i => vis(i));
+    if (!inp) return 'no-input';
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(inp, String(qid));
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    inp.dispatchEvent(new Event('change', { bubbles: true }));
+    try { inp.focus(); } catch (_) {}
+    inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    inp.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    return 'ok';
+  }, id).catch(() => 'err');
+  if (searched !== 'ok') {
+    // 回车不行 → 点「搜索」按钮兜底
+    await vp.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button,[role="button"],span,div,a'));
+      const b = btns.find(e => e.offsetParent !== null && /^搜索$/.test((e.innerText || '').trim()));
+      if (b) try { b.click(); } catch (_) {}
+    }).catch(() => {});
+  }
+  await vp.waitForTimeout(5000);
+  await waitIfCaptcha(vp, 30000);
+
+  // ③ 站内点击达人卡片（优先命中 /market/detail/{id} 的链接）
+  const clicked = await vp.evaluate((qid) => {
+    const anchors = Array.from(document.querySelectorAll('a[href]'));
+    const exact = anchors.find(a => new RegExp('/market/detail/' + qid + '(?:\\?|/|$)').test(a.href)) ||
+      anchors.find(a => new RegExp('/detail/' + qid + '(?:\\?|/|$)').test(a.href));
+    const anyDetail = anchors.find(a => /\/ad\/creator\/(?:market\/)?detail\/\d+/.test(a.href));
+    const target = exact || anyDetail;
+    if (target) { target.scrollIntoView({ block: 'center' }); try { target.click(); } catch (_) {} return target.href; }
+    // 无 <a>：找带该 ID 的可点击卡片兜底
+    const cards = Array.from(document.querySelectorAll('[class*="creator" i],[class*="author" i],[class*="card" i],[class*="result" i]'));
+    const card = cards.find(c => c.offsetParent !== null && new RegExp(qid).test(c.getAttribute('data-id') || c.outerHTML || ''));
+    if (card) { card.scrollIntoView({ block: 'center' }); try { card.click(); } catch (_) {} return 'card:' + qid; }
+    return '';
+  }, id).catch(() => '');
+  if (!clicked) return { reached: false };
+
+  // ④ 等 SPA 路由到市场详情
+  try {
+    await vp.waitForFunction((qid) => new RegExp('/ad/creator/(?:market/)?detail/' + qid + '(?:\\?|/|$)').test(location.href), id, { timeout: 15000 });
+  } catch (_) { /* 路由可能不同，继续尝试点 tab */ }
+  await vp.waitForTimeout(3000);
+  await waitIfCaptcha(vp, 30000);
+
+  // ⑤ 点「创作能力」tab（作品表现/创作案例区域）
+  await vp.evaluate(() => {
+    const kw = /创作能力|作品表现|创作案例|^作品$|TA的视频|视频内容/;
+    const els = Array.from(document.querySelectorAll('div,span,a,button,li,[role="tab"]'));
+    const hit = els.find(e => {
+      const t = (e.innerText || '').trim();
+      return t && t.length <= 10 && kw.test(t) && e.offsetParent !== null;
+    });
+    if (hit) { hit.scrollIntoView({ block: 'center' }); try { hit.click(); } catch (_) {} }
+  }).catch(() => {});
+  await vp.waitForTimeout(3500);
+  await waitIfCaptcha(vp, 30000);
+
+  // ⑥ 依次点前 3 个视频封面 → 触发详情弹窗接口（站内弹窗，URL 不变），每个抓完关闭
+  for (let k = 0; k < 3; k++) {
+    const n = await vp.evaluate((idx) => {
+      const vis = (e) => { try { return e && e.offsetParent !== null && e.offsetWidth > 60 && e.offsetHeight > 60; } catch (_) { return false; } };
+      const cand = Array.from(document.querySelectorAll(
+        'a[href*="video"],a[href*="aweme"],[class*="video-item" i],[class*="work-item" i],[class*="aweme" i],[class*="video-card" i],[class*="cover" i],[class*="video" i]'
+      )).filter(vis);
+      const el = cand[idx];
+      if (!el) return 0;
+      el.scrollIntoView({ block: 'center' });
+      try { el.click(); } catch (_) {}
+      return 1;
+    }, k).catch(() => 0);
+    if (!n) break;
+    await vp.waitForTimeout(2500);
+    await waitIfCaptcha(vp, 30000);
+    // 关闭弹窗（×/关闭按钮 或 Esc）
+    await vp.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('[class*="close" i],[aria-label*="close" i],[class*="mask" i],button,span,div'));
+      const c = btns.find(b => b.offsetParent !== null &&
+        (/close|关闭|modal|dialog|mask/i.test(b.className || '') || /^(关闭|×|✕|X|x)$/.test((b.innerText || '').trim())));
+      if (c) try { c.click(); } catch (_) {}
+    }).catch(() => {});
+    await vp.keyboard.press('Escape').catch(() => {});
+    await vp.waitForTimeout(800).catch(() => {});
+  }
+
+  const onDetail = await vp.evaluate((qid) =>
+    new RegExp('/ad/creator/(?:market/)?detail/' + qid + '(?:\\?|/|$)').test(location.href), id).catch(() => false);
+  return { reached: !!onDetail };
+}
+
+/**
+ * v3.7.2 主链路（实测定稿，替代不稳定的广场站内导航）：直接冷开服务商端达人详情页
+ *   /provider/pages/author/douyin/{id} —— 服务商 /sup/ 会话下整页 goto 不重定向、直接渲染，
+ *   无需广场搜索/点卡片/弹新 tab，批量稳定。落地后点顶部 el-tabs「创作能力」tab，
+ *   页面即拉 get_author_show_items_v2（响应已由调用方 vp.on('response') 拦截进 apiHits）。
+ * 任一步失败返回 reached:false，调用方再降级冷开 /sup/author/detail 至少拿资料，不阻塞打标。
+ */
+async function enterProviderAuthorPage(vp, authorId) {
+  const id = String(authorId || '').trim();
+  if (!id) return { reached: false, creative: false };
+  try {
+    await vp.goto(PROVIDER_AUTHOR_URL(id), { waitUntil: 'domcontentloaded', timeout: 45000 });
+  } catch (_) { return { reached: false, creative: false }; }
+  await vp.waitForTimeout(7000).catch(() => {});
+  await waitIfCaptcha(vp, 30000);
+  // 点顶部「创作能力」tab（Element UI .el-tabs__item，精确匹配文案；宽松兜底含“创作能力”的 tab）
+  const creative = await vp.evaluate(() => {
+    const tabs = Array.from(document.querySelectorAll('.el-tabs__item,[role="tab"],[class*="tab" i]'));
+    let t = tabs.find((e) => (e.innerText || '').trim() === '创作能力');
+    if (!t) t = tabs.find((e) => /创作能力/.test((e.innerText || '').trim()) && (e.innerText || '').trim().length <= 8);
+    if (t) { try { t.scrollIntoView({ block: 'center' }); } catch (_) {} try { t.click(); } catch (_) {} return true; }
+    return false;
+  }).catch(() => false);
+  if (creative) {
+    try { await vp.waitForResponse((r) => /get_author_show_items_v2/.test(r.url()), { timeout: 12000 }); }
+    catch (_) { /* 接口可能已返回或在飞行中，下面 apiHits 兜底 */ }
+  }
+  await vp.waitForTimeout(1800).catch(() => {});
+  await waitIfCaptcha(vp, 30000);
+  const reached = await vp.evaluate((qid) =>
+    new RegExp('/provider/pages/author/douyin/' + qid + '(?:\\?|/|$)').test(location.href), id).catch(() => false);
+  return { reached: !!reached, creative: !!creative };
+}
+
+// v3.7.2：从创作能力 tab 的 get_author_show_items_v2 响应里精确取前三个视频。
+// data.latest_item_info = 个人最新视频（默认「全部」列表前 15 条，创作能力代表内容，优先）；
+// data.latest_star_item_info = 星图商单视频（个人不足 3 条时补足）。视频链接统一按抖音视频页拼。
+function pickShowItemVideos(apiHits) {
+  const out = [];
+  const seen = new Set();
+  const push = (it) => {
+    if (!it || typeof it !== 'object') return;
+    const id = String(it.item_id || it.video_id || it.aweme_id || '').trim();
+    if (!/^\d{15,}$/.test(id) || seen.has(id)) return;
+    seen.add(id);
+    const title = normText(it.item_title || it.title || it.desc).slice(0, 80);
+    const plays = parseMediaCount(it.play != null ? it.play : (it.play_count || 0));
+    const likes = parseMediaCount(it.like != null ? it.like : (it.digg_count || 0));
+    const hasProduct = !!(it.goods_list || it.goods || it.product_info || it.with_goods || it.has_product) ||
+      (!!title && VIDEO_SELL_KW.test(title));
+    out.push({ id, url: buildVideoUrl(id, ''), title, plays, likes, hasProduct });
+  };
+  for (const h of apiHits) {
+    if (!/get_author_show_items_v2/.test(h.url || '')) continue;
+    const d = (h.json && h.json.data) || {};
+    const personal = Array.isArray(d.latest_item_info) ? d.latest_item_info : [];
+    const star = Array.isArray(d.latest_star_item_info) ? d.latest_star_item_info : [];
+    personal.forEach(push);              // 个人最新视频优先
+    if (out.length < 3) star.forEach(push); // 不足补星图商单视频
+    break;
+  }
+  return out.slice(0, 3);
+}
+
+/**
+ * v3.6 打标主链路（v3.7.2 改为冷开服务商详情页直取创作能力视频）：
+ *   先进服务商广场搜索达人 ID → 站内点卡片到 /ad/creator/market/detail/{id} →
+ *   点「创作能力」tab，拦截视频列表/详情 XHR，一次拿到：
  *   ① 达人资料：星川等级 / 交付项目数 / 星图消耗 / 电商等级 / 粉丝数 / 内容主题标签
- *      ——优先拦截主页 XHR/fetch 响应挖达人对象（ID 精确匹配），拦截不到则
- *        降级解析主页 DOM（头部文本正则 + 标签 chips）；
- *   ② 前三个视频：标题 / 播放 / 点赞 / 内容形式 / 带货信号（XHR 优先、DOM 降级）。
- * 主页打不开（ID 无效 / 未入驻 / 被重定向到广场或 SSO / 无任何资料信号）→
- * 返回 { ok:false }，调用方降级走昵称搜索，绝不阻塞打标。
+ *      ——优先拦截 XHR/fetch 响应挖达人对象（ID 精确匹配），拦截不到降级 DOM；
+ *   ② 前三个视频：链接 / 标题 / 播放 / 点赞 / 内容形式 / 带货信号（XHR 优先、DOM 降级）。
+ *   站内导航失败时回退冷开 /sup/author/detail/{id} 至少拿资料；两条路都失败返回
+ *   { ok:false }，调用方降级走昵称搜索，绝不阻塞打标。
  * debug=true（XC_TAGGER_DEBUG=1）时落截图 + 接口 JSON + DOM 状态到 .xc-debug/。
  */
 async function fetchCreatorHome(page, authorId, { debug = false } = {}) {
@@ -1387,30 +1623,33 @@ async function fetchCreatorHome(page, authorId, { debug = false } = {}) {
         apiHits.push({ url: u, json: j });
       } catch (_) { /* 非 JSON */ }
     });
-    await vp.goto(CREATOR_DETAIL_URL(authorId), { waitUntil: 'domcontentloaded', timeout: 30000 });
-    // 等主页资料/视频列表接口（9s 内命中即继续，否则走 DOM 降级）
+    // v3.7.2：主链路 = 冷开服务商端达人详情页 /provider/pages/author/douyin/{id}（不重定向、批量稳定），
+    // 落地后自动/点「创作能力」tab 拉 get_author_show_items_v2；response 监听已挂在 vp 上。
+    let nav = await enterProviderAuthorPage(vp, authorId).catch(() => ({ reached: false, creative: false }));
+    // 等最后一批视频接口回来
     await vp.waitForResponse((r) => {
       try {
         const rt = r.request().resourceType();
         if (rt !== 'xhr' && rt !== 'fetch') return false;
-        return /video|aweme|work|post|feed|creator|author|user.*info|detail|portrait|stat/i.test(r.url());
+        return /get_author_show_items_v2|show_items|homepage_videos|video|aweme|work|post|feed|content/i.test(r.url());
       } catch (_) { return false; }
-    }, { timeout: 9000 }).catch(() => {});
-    await vp.waitForTimeout(2000);
-    // 尝试切换到「创作能力/作品/视频」tab（视频列表常在该 tab 下）
-    await vp.evaluate(() => {
-      const kw = /创作能力|作品|视频|内容|TA的视频/;
-      const els = Array.from(document.querySelectorAll('div,span,a,button,li,[role="tab"]'));
-      const hit = els.find((e) => {
-        const t = (e.innerText || '').trim();
-        return t && t.length <= 10 && kw.test(t) && e.offsetParent !== null;
-      });
-      if (hit) { try { hit.click(); } catch (_) {} }
-    }).catch(() => {});
-    await vp.waitForTimeout(2500);
+    }, { timeout: 6000 }).catch(() => {});
+    await vp.waitForTimeout(1200).catch(() => {});
 
     // ---- 主页状态：重定向/未入驻 判定 + DOM 资料 ----
-    const domState = await vp.evaluate(domHomeStateEval).catch(() => null);
+    let domState = await vp.evaluate(domHomeStateEval).catch(() => null);
+    // 服务商详情页没进成 → 依次降级：① 广场站内导航；② 冷开 /sup/author/detail/{id} 至少拿资料（视频可能为空，不阻塞）
+    if (!(domState && domState.onDetail) && nav && !nav.reached) {
+      const m2 = await enterCreatorDetailViaMarket(vp, authorId).catch(() => ({ reached: false }));
+      domState = await vp.evaluate(domHomeStateEval).catch(() => domState);
+      if (!(domState && domState.onDetail) && m2 && !m2.reached) {
+        try {
+          await vp.goto(CREATOR_DETAIL_URL(authorId), { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+          await vp.waitForTimeout(2500).catch(() => {});
+          domState = await vp.evaluate(domHomeStateEval).catch(() => domState);
+        } catch (_) {}
+      }
+    }
     const stateKnown = !!domState;
     const onDetail = !!(domState && domState.onDetail);
     const notFound = !!(domState && domState.notFound);
@@ -1420,10 +1659,10 @@ async function fetchCreatorHome(page, authorId, { debug = false } = {}) {
         const ts = Date.now();
         await vp.screenshot({ path: path.join(dbgDir, `creator_${authorId}_${ts}.png`), fullPage: false }).catch(() => {});
         fs.writeFileSync(path.join(dbgDir, `creator_${authorId}_${ts}.json`),
-          JSON.stringify({ domState, apiHits: apiHits.map((h) => ({ url: h.url, json: h.json })) }).slice(0, 3000000), 'utf8');
+          JSON.stringify({ domState, nav, apiHits: apiHits.map((h) => ({ url: h.url, json: h.json })) }).slice(0, 3000000), 'utf8');
       } catch (_) {}
     }
-    // 被重定向（无效 ID/未登录跳广场或 SSO）或页面明示不存在 → 主页失败，交调用方兜底
+    // 站内/冷开两条路都不在详情页，或页面明示不存在 → 主页失败，交调用方兜底
     if (stateKnown && (!onDetail || notFound)) return fail(notFound ? 'notfound' : 'redirect');
 
     // ---- ① 资料：XHR 挖达人对象（ID 精确匹配优先）----
@@ -1439,9 +1678,12 @@ async function fetchCreatorHome(page, authorId, { debug = false } = {}) {
     }
     if (!auth) return fail(stateKnown ? 'no-data' : 'error');
 
-    // ---- ② 视频：XHR 挖 ----
-    let vids = [];
-    for (const h of apiHits) deepCollectVideos(h.json, vids, 0);
+    // ---- ② 视频：首选创作能力 tab 的 get_author_show_items_v2（个人最新视频前3，口径最准）----
+    let vids = pickShowItemVideos(apiHits);
+    // ②b 兜底：其余 XHR 深度遍历挖视频
+    if (vids.length === 0) {
+      for (const h of apiHits) deepCollectVideos(h.json, vids, 0);
+    }
     const seen = new Set();
     vids = vids.filter((v) => {
       const key = v.id || v.title.slice(0, 20);
@@ -1654,8 +1896,9 @@ function startServer() {
     if (loggedIn) _loggedIn = true;
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.7.0', port: PORT,
+      ok: true, loggedIn, version: '3.7.1', port: PORT,
       loginUrl: SUP_URL,
+      marketUrl: PROVIDER_MARKET_URL,
       cookiesFile: '.xc-cookies.json',
       cookieCount,
       loginPending: _loginPending,
@@ -1828,6 +2071,7 @@ function startServer() {
             sLevel: '', lLevel: '', deliveries: 0, consumption: 0, fans: 0, fansTier: '',
             persona: [], forms: [], style: [], scene: [], industry: [], category: '',
             videoLinks: [], mainCategory: '', hotDirection: '', confidence: '低',
+            homeUrl: it.id ? PROVIDER_AUTHOR_URL(it.id) : '',
             tags: ['未检索到'],
             reason: '未能通过 ID 进入主页，昵称搜索也未命中，请核实达人是否入驻星图',
             dataSource: 'new', videoBonus: 0, videoAnalysis: [],
@@ -1861,6 +2105,7 @@ function startServer() {
           mainCategory: insights.mainCategory,
           hotDirection: insights.hotDirection,
           confidence: insights.confidence,
+          homeUrl: PROVIDER_AUTHOR_URL(auth.id || it.id || ''),
           tags: sc.tags, reason,
           dataSource: sc.dataSource, videoBonus: sc.videoBonus, videoAnalysis,
           via,
@@ -1878,7 +2123,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.7.0');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.7.1');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
@@ -1950,6 +2195,16 @@ module.exports = {
   pickHomeAuthor,
   authorFullness,
   mergeAuth,
+  // v3.7.1
+  PROVIDER_MARKET_URL,
+  MARKET_DETAIL_URL,
+  enterCreatorDetailViaMarket,
+  waitIfCaptcha,
+  captchaPresentEval,
+  // v3.7.2
+  PROVIDER_AUTHOR_URL,
+  enterProviderAuthorPage,
+  pickShowItemVideos,
 };
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
