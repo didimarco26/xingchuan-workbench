@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.6.1
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.6.2
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，它会：
  *   1) 在 127.0.0.1:7842 起一个本地 HTTP 服务（只监听本机，不对外）；
@@ -9,8 +9,10 @@
  *      启动独立实例并 connectOverCDP 附加，也会先附加已在运行的调试 Chrome
  *      （9222-9225 端口探测）。浏览器真实可见，服务商在窗口里登录。
  *   3) 登录（仅需一次）：网页点「🚀 登录星图」→ POST /login，工具每 3 秒
- *      主动轮询所有标签页 URL（纯 URL 判定：xingtu.cn 下路径含 /ad 段
- *      或 /sup/author/ 段即成功），
+ *      主动轮询所有标签页 URL（纯 URL 判定：xingtu.cn 下路径落在服务商端
+ *      /sup/ 段——含 /sup/ 控制台首页与 /sup/author/ 创作者主页——即成功；
+ *      v3.6.2 起登录引导/检测全部走服务商端 /sup/，不再走广告主端 /ad/，
+ *      避免两端 session 隔离导致 /sup/ 下无登录态），
  *      扫码/账号密码/验证码均可；成功后写 Cookie 备份、CDP 模式自动关闭窗口，
  *      /health 内存登录位即时生效。超时 5 分钟。
  *   4) 打标：POST /tag 时后台自动重开浏览器（同一配置目录免登录）：
@@ -63,13 +65,18 @@ const HOST = '127.0.0.1';
 const COOKIES_FILE = path.resolve(__dirname, '.xc-cookies.json');
 // 巨量星图 · 达人广场（广告主侧）。抓取接口与该页同源(www.xingtu.cn)，注入 Cookie 后天然带登录态。
 const XINGTU_ORIGIN = 'https://www.xingtu.cn';
+// v3.6.2：服务商端控制台首页 = 登录引导页/登录态判定页。
+// 服务商账号必须从 /sup/ 端发起登录：未登录访问 /sup/ 会被星图重定向到 SSO，
+// 登录成功后 SSO 回跳 /sup/，建立的是【服务商端】会话；/ad/ 广告主端与 /sup/
+// 服务商端 session 相互隔离，若从 /ad/ 登录，/sup/author/detail 下仍无登录态。
+const SUP_URL = 'https://www.xingtu.cn/sup/';
 // v3.6.1：达人广场改为新路径 /pro/ad/pages/market（旧 /ad/creator/square 在普通账号下已重定向/失效）。
+// 仅作为昵称搜索兜底页（v3.6.2 起不再用于登录引导/登录态判定）。
 const SQUARE_URL = 'https://www.xingtu.cn/pro/ad/pages/market';
-// 巨量引擎统一登录直达页（role=1 客户侧）：未登录访问达人广场会被踢到此 SSO。
-// 直接导航到它可省去「营销首页→点登录→选客户角色」几步点击，真机/无头都更稳；
-// 登录成功后 SSO 自动回跳 redirect_uri（达人广场）。
-const LOGIN_URL = 'https://sso.oceanengine.com/xingtu/login?redirect_uri=' +
-  encodeURIComponent('/pro/ad/pages/market') + '&role=1';
+// 登录直达页（v3.6.2）：直接导航服务商端控制台 /sup/。未登录时星图自动 302 到
+// sso.oceanengine.com 统一登录页（redirect_uri 由星图按服务商端编码，role 正确），
+// 登录成功后回跳 /sup/——天然建立服务商端会话。无头扫码同理：goto 后落在 SSO 页点抖音图标。
+const LOGIN_URL = SUP_URL;
 // 固定一个常见桌面 UA，避免无头浏览器被星图风控识别
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const DEBUG_DUMP = process.env.XC_TAGGER_DEBUG === '1'; // 调试：把原始响应落盘
@@ -303,7 +310,7 @@ async function launchSystemBrowser(cand, port, profileDir) {
     '--no-default-browser-check',
     '--disable-default-apps',
     '--disable-translate',
-    SQUARE_URL,
+    SUP_URL,
   ];
   let proc = null;
   let settled = false;
@@ -452,13 +459,14 @@ async function acquireSession() {
 
 /**
  * 在浏览器上下文里找一个可复用的标签页（v3.3：避免重复开 SSO 登录页）。
- * 优先级：已在星图 /ad/ 创作者区的页 → 任意星图页 → 停在 SSO/登录页的页 → null。
+ * 优先级：已在星图服务商端 /sup/ 控制台的页 → 任意星图页 → 停在 SSO/登录页的页 → null。
+ * v3.6.2：优先匹配 /sup/（服务商端），不再优先 /ad/（广告主端 session 与 /sup/ 隔离）。
  */
 function findReusablePage(ctx) {
   const pages = ctx.pages ? ctx.pages() : [];
   const urlOf = (p) => { try { return p.url() || ''; } catch (_) { return ''; } };
   const alive = pages.filter(p => { try { return p && !p.isClosed(); } catch (_) { return false; } });
-  return alive.find(p => { const u = urlOf(p); return /xingtu\.cn/.test(u) && /\/ad\//.test(u); })
+  return alive.find(p => { const u = urlOf(p); return /xingtu\.cn/.test(u) && /\/sup(?:\/|$)/.test(u); })
     || alive.find(p => /xingtu\.cn/.test(urlOf(p)))
     || alive.find(p => /oceanengine\.com|sso|login/i.test(urlOf(p)))
     || null;
@@ -466,7 +474,8 @@ function findReusablePage(ctx) {
 
 /**
  * 获取会话内的星图工作标签页：复用已打开的星图/SSO 页，没有才新开；
- * 并确保最终落在星图 /ad/ 达人广场（打标接口必须在 www.xingtu.cn 同源下调用）。
+ * 并确保最终落在星图服务商端 /sup/ 控制台（v3.6.2：打标主链路 /sup/author/detail
+ * 与同源接口都依赖服务商端会话；不再收敛到广告主端 /ad/ 广场）。
  */
 async function sessionWorkPage(sess) {
   if (sess._workPage && !sess._workPage.isClosed()) return sess._workPage;
@@ -476,11 +485,11 @@ async function sessionWorkPage(sess) {
   try { await page.setViewportSize({ width: 1280, height: 860 }); } catch (_) {}
   let url = '';
   try { url = page.url() || ''; } catch (_) {}
-  // 不在星图 /ad/ 区域（SSO 登录页 / 营销首页 / about:blank）→ 导航到达人广场；
-  // 已登录会直接渲染广场，未登录会被重定向到 SSO（checkLoggedIn 据此判定）。
-  if (!(/xingtu\.cn/.test(url) && /\/ad\//.test(url))) {
+  // 不在星图服务商端 /sup/ 区域（SSO 登录页 / 营销首页 / about:blank）→ 导航到 /sup/ 控制台；
+  // 已登录会直接渲染控制台（URL 留在 /sup/），未登录会被重定向到 SSO（checkLoggedIn 据此判定）。
+  if (!(/xingtu\.cn/.test(url) && /\/sup(?:\/|$)/.test(url))) {
     try {
-      await page.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.goto(SUP_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
       await page.waitForTimeout(2500); // 等 JS 渲染，避免误判登录态
     } catch (e) {
       console.log('⚠️ 打开星图异常（稍后自动重试）：' + friendlyErr(e));
@@ -538,8 +547,9 @@ async function refreshQr(page) {
 }
 
 /**
- * 无头模式：导航到 SSO 登录页并切到「抖音扫码」。
- * 直达 LOGIN_URL（省去营销首页点登录/选角色），再点「其他方式-抖音」图标
+ * 无头模式：导航到登录页并切到「抖音扫码」。
+ * v3.6.2：goto 服务商端 /sup/（LOGIN_URL），未登录会被星图 302 到 SSO 统一登录页
+ * （redirect_uri 回跳 /sup/，服务商角色正确）；落到 SSO 页后点「其他方式-抖音」图标
  * （.icon.douyin），右侧卡片即加载抖音扫码二维码。返回 true 表示已进入扫码流程。
  */
 async function gotoDouyinQr(page) {
@@ -598,11 +608,12 @@ async function addCookiesSafe(ctx, cookies) {
 }
 
 // ★ v3.4：纯 URL 登录判定（不读页面内容）。
-// 规则：URL 在 xingtu.cn 域名下，且路径含 /ad/（创作者/广告主区域），即视为已登录。
-// 依据：未登录访问任意 /ad/ 页会被星图重定向到 sso.oceanengine.com 登录页（URL 离开
-// xingtu.cn）；营销首页/角色页在 www.xingtu.cn 根路径（不含 /ad/）。旧版读 innerText
-// 的启发式在页面跳转瞬间（Execution context destroyed）会抛异常、在角色选择等子页面
-// 会因正文关键词不匹配而误判，是「窗口里已登录、工具却提示未登录」的根因。
+// 规则（v3.6.2 修订）：URL 在 xingtu.cn 域名下，且路径落在【服务商端 /sup/ 段】即视为已登录。
+// 依据：未登录访问任意 /sup/ 页（控制台首页 /sup/、创作者主页 /sup/author/detail/{id}）
+// 都会被星图重定向到 sso.oceanengine.com 登录页（URL 离开 xingtu.cn）；只有服务商端会话
+// 建立后才会停在 /sup/。v3.6.2 起【不再】把 /ad/（广告主端，含 /pro/ad/pages/market 广场）
+// 当作登录成功——广告主端与服务商端 session 隔离，/ad/ 已登录不代表 /sup/ 有登录态，
+// 旧逻辑正是「窗口里 /ad/ 已登录、/sup/author/detail 却一直未检索到」的根因。
 // 另排除仍在登录链路上的 URL（SSO/护照/redirect_uri 参数/login 路径），双保险。
 function isLoggedInUrl(url) {
   if (!url) return false;
@@ -613,10 +624,9 @@ function isLoggedInUrl(url) {
     path = p.pathname || '';
   } catch (_) { return false; }
   if (!/(^|\.)xingtu\.cn$/i.test(host)) return false;      // 主机名必须是星图域名（含子域）
-  // v3.6.1：登录区域 = /ad/ 段（创作者/广告主，含新广场 /pro/ad/pages/market）
-  //          或 /sup/author/ 段（创作者主页 /sup/author/detail/{id}，v3.6.1 主链路新路径）。
-  //          依据：未登录访问这两类页面都会被重定向到 sso.oceanengine.com（离开 xingtu.cn）。
-  if (!/(^|\/)ad(?:\/|$)/i.test(path) && !/^\/sup\/author\//i.test(path)) return false;
+  // v3.6.2：登录区域 = 服务商端 /sup/ 段（含控制台首页 /sup/ 与创作者主页 /sup/author/detail/{id}）。
+  // 广告主端 /ad/（含达人广场 /pro/ad/pages/market）不再判为登录成功。
+  if (!/^\/sup(?:\/|$)/i.test(path)) return false;
   if (/\/(sso|passport|login)(?:\/|$)/i.test(path)) return false; // 仍在登录链路
   return true;
 }
@@ -645,10 +655,10 @@ const LOGIN_POLL_MS = 3000;   // v3.4：每 3 秒主动轮询一次所有标签�
  * - 无头模式：工具截取登录页二维码写入 _qr，前端 GET /login/qr 展示，
  *   服务商在网页上用手机抖音 App 扫码。
  * ★ v3.3：① 复用浏览器里已有的星图/SSO 标签页，不重复开页；
- *   ② 轮询时遍历【所有标签页】，任一标签进入星图 /ad/ 创作者区即判成功
+ *   ② 轮询时遍历【所有标签页】，任一标签进入星图服务商端 /sup/ 控制台即判成功
  *   （用户可能在启动时自带的那个标签页里登录，旧版只盯新开的页会漏判）；
- *   ③ 登录后落在营销首页等非 /ad/ 页时，自动导航到达人广场做最终复核；
- *   ④ 成功后工作页统一收敛到 /ad/ 广场页（打标同源调用），并全量回写 Cookie。
+ *   ③ 登录后落在营销首页等非 /sup/ 页时，自动导航到 /sup/ 控制台做最终复核；
+ *   ④ 成功后工作页统一收敛到 /sup/ 控制台（服务商端会话），并全量回写 Cookie。
  * 返回 {ok, loggedIn, cancelled?, needInstall?, mode?, browserName?, message?}。
  * @param {{aborted:boolean}} signal 前端取消标志（请求中断时置 true）
  */
@@ -660,13 +670,13 @@ async function runLogin(signal) {
     return { ok: false, loggedIn: false, needInstall: true, message: friendlyErr(e) };
   }
 
-  // 登录成功收尾：把工作页收敛到 /ad/ 广场、回写 Cookie、复位二维码状态
+  // 登录成功收尾：把工作页收敛到服务商端 /sup/ 控制台、回写 Cookie、复位二维码状态
   const finishLogin = async (loggedPage) => {
     let work = loggedPage;
     try {
       const u = (() => { try { return work.url() || ''; } catch (_) { return ''; } })();
       if (!isLoggedInUrl(u)) {
-        await work.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+        await work.goto(SUP_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
         await work.waitForTimeout(2500).catch(() => {});
       }
     } catch (_) { /* 导航失败不影响登录态判定 */ }
@@ -686,7 +696,7 @@ async function runLogin(signal) {
   };
 
   // v3.4：每 3 秒主动轮询——遍历所有上下文的所有标签页，【只看 URL、不读页面内容】：
-  // 任一标签页落在 xingtu.cn 的 /ad/ 创作者区域即判定登录成功。
+  // 任一标签页落在 xingtu.cn 的服务商端 /sup/ 控制台即判定登录成功。
   const findLoggedInPage = async () => {
     for (const ctx of allContexts()) {
       let pages = [];
@@ -713,7 +723,7 @@ async function runLogin(signal) {
     console.log('🪟 登录窗口已自动关闭（登录态已保存在本机，打标时会在后台自动重开浏览器）。');
   };
 
-  // 已登录快速返回（任一标签页在 /ad/ 创作者区域）。此路径说明登录态此前已建立，
+  // 已登录快速返回（任一标签页在服务商端 /sup/ 控制台）。此路径说明登录态此前已建立，
   // 保留现有浏览器会话供打标直接复用，不关窗、不重开。
   let already = await findLoggedInPage();
   if (already) {
@@ -732,11 +742,11 @@ async function runLogin(signal) {
   }
   sess._workPage = page;
 
-  // 未登录：导航到直达 SSO 登录页
+  // 未登录：导航到服务商端 /sup/ 控制台（未登录会自动跳到 SSO，登录后回跳 /sup/）
   if (sess.mode === 'cdp') {
     try {
       const u = (() => { try { return page.url(); } catch (_) { return ''; } })();
-      if (!/sso\.oceanengine\.com|\/ad\//.test(u)) await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      if (!/sso\.oceanengine\.com|\/sup(?:\/|$)/.test(u)) await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
       await page.bringToFront();
     } catch (_) { /* 导航失败也让用户在可见窗口里手动操作 */ }
     console.log('🟢 请在已打开的 ' + sess.browserName + ' 窗口中登录巨量星图（可抖音扫码或账号密码/手机验证码登录）…');
@@ -767,8 +777,8 @@ async function runLogin(signal) {
     }
     // ① 所有上下文的所有标签页里找已登录的（纯 URL 判定）
     let loggedPage = await findLoggedInPage();
-    // ② CDP 落地页复核：某标签已到 xingtu.cn 但不在 /ad/（营销首页/角色页等），
-    //    导航该页到达人广场——已登录会渲染广场（URL 留在 /ad/），未登录会被踢回 SSO。
+    // ② CDP 落地页复核：某标签已到 xingtu.cn 但不在 /sup/（营销首页/角色页等），
+    //    导航该页到服务商端 /sup/ 控制台——已登录会渲染控制台（URL 留在 /sup/），未登录会被踢回 SSO。
     //    每 8 秒最多一次，避免打断用户正在操作的登录页（SSO/护照页不导航）。
     if (!loggedPage && sess.mode === 'cdp' && Date.now() - lastSquareCheck > 8000) {
       lastSquareCheck = Date.now();
@@ -780,7 +790,7 @@ async function runLogin(signal) {
           try {
             if (!p || p.isClosed()) return false;
             const u = p.url() || '';
-            // 星图域名下、尚未进入 /ad/ 创作者区、且不在 SSO/护照/登录链路 → 落地页，导航到广场复核
+            // 星图域名下、尚未进入服务商端 /sup/ 控制台、且不在 SSO/护照/登录链路 → 落地页，导航到 /sup/ 复核
             return /xingtu\.cn/i.test(u) && !isLoggedInUrl(u) &&
               !/sso\.oceanengine\.com|passport|redirect_uri=|\/(sso|login)(?:\/|$)/i.test(u);
           } catch (_) { return false; }
@@ -789,7 +799,7 @@ async function runLogin(signal) {
       }
       if (landing) {
         try {
-          await landing.goto(SQUARE_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await landing.goto(SUP_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
           await landing.waitForTimeout(2500);
           loggedPage = await findLoggedInPage();
         } catch (_) { /* 下轮再试 */ }
@@ -1501,10 +1511,10 @@ function startServer() {
   app.use(express.raw({ type: () => true, limit: '15mb' })); // 接收上传文件原始字节
 
   // 健康检查 / 登录状态 / 浏览器模式
-  // v3.4：不在 /health 里导航浏览器（前端每 2.5s 轮询，sessionWorkPage 会反复 goto 广场）。
+  // v3.4：不在 /health 里导航浏览器（前端每 2.5s 轮询，sessionWorkPage 会反复 goto /sup/）。
   // 登录态来源：①内存登录位 _loggedIn（登录成功即置位）；②对【已存活】会话做零副作用
-  // URL 扫描（只遍历所有上下文所有标签页的 URL，不 evaluate、不导航），命中 xingtu.cn/ad/
-  // 也置位。登录成功后 CDP 浏览器已关闭、_session 为 null，此时靠内存位返回已登录。
+  // URL 扫描（只遍历所有上下文所有标签页的 URL，不 evaluate、不导航），命中 xingtu.cn/sup/
+  // （服务商端控制台，v3.6.2）也置位。登录成功后 CDP 浏览器已关闭、_session 为 null，此时靠内存位返回已登录。
   app.get('/health', async (_req, res) => {
     let loggedIn = !!_loggedIn;
     let browserInfo = { mode: null, ready: false, name: '', cdpPort: null };
@@ -1530,8 +1540,8 @@ function startServer() {
     if (loggedIn) _loggedIn = true;
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.6.1', port: PORT,
-      loginUrl: SQUARE_URL,
+      ok: true, loggedIn, version: '3.6.2', port: PORT,
+      loginUrl: SUP_URL,
       cookiesFile: '.xc-cookies.json',
       cookieCount,
       loginPending: _loginPending,
@@ -1615,7 +1625,7 @@ function startServer() {
       const page = await sessionWorkPage(sess);
       // v3.5.1：优先信任内存登录位 _loggedIn（登录成功时已置 true）；
       // 仅当内存位为 false 时才用 checkLoggedIn 做 URL 二次探测，避免
-      // sessionWorkPage 导航到非 /ad/ 页面时误判为未登录。
+      // sessionWorkPage 导航跳转瞬间误判为未登录。
       let loggedIn = !!_loggedIn;
       if (!loggedIn) {
         loggedIn = await checkLoggedIn(page);
@@ -1738,7 +1748,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.6.1');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.6.2');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
@@ -1788,6 +1798,7 @@ module.exports = {
   CDP_CANDIDATE_PORTS,
   CHROME_PROFILE_DIR,
   SQUARE_URL,
+  SUP_URL,
   LOGIN_URL,
   LOGIN_WAIT_MS,
   LOGIN_POLL_MS,

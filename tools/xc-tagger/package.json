@@ -1,8 +1,8 @@
 {
   "name": "xc-tagger",
-  "version": "3.6.1",
+  "version": "3.6.2",
   "private": true,
-  "description": "星川服务商达人自助打标 · 本地一键工具 v3.6.1（离线包内置 node_modules 解压即用；登录每 3 秒纯 URL 轮询所有标签页，扫码或账号密码登录均可，检测到 xingtu.cn/ad/ 或 xingtu.cn/sup/author/ 即判成功并自动关闭浏览器窗口；v3.6.1 修复主链路路径：创作者主页改用 /sup/author/detail/{id}（旧 /ad/creator/detail/{id} 在普通星图账号下会被重定向导致未检索到），达人广场兜底页改用 /pro/ad/pages/market，登录判定同步支持 /sup/author/ 段；v3.6 打标主链路为 ID 直进达人主页，拦截主页 XHR（失败降级 DOM）抓取星川等级/交付项目/星图消耗/电商等级/粉丝数/内容主题标签与前三个视频，主页打不开才降级广场搜索；v3.5 双库口径打分保留：存量库 80 分制、增量/新达人叠加视频分析加分最多+20 封顶100，输出 dataSource/videoBonus/videoAnalysis；无头后台抓取按存量达人逻辑分层打标）",
+  "description": "星川服务商达人自助打标 · 本地一键工具 v3.6.2（离线包内置 node_modules 解压即用；登录每 3 秒纯 URL 轮询所有标签页，扫码或账号密码登录均可，检测到服务商端 xingtu.cn/sup/（含控制台首页与 /sup/author/ 创作者主页）即判成功并自动关闭浏览器窗口；v3.6.2 修复登录端隔离：登录引导/登录态判定/会话收敛全部改走服务商端 /sup/（不再走广告主端 /ad/，两端 session 隔离，旧版从 /ad/ 登录会导致 /sup/author/detail 无登录态一直未检索到）；v3.6.1 创作者主页为 /sup/author/detail/{id}、达人广场兜底页为 /pro/ad/pages/market（广场页仅作昵称搜索兜底，不用于登录判定）；v3.6 打标主链路为 ID 直进达人主页，拦截主页 XHR（失败降级 DOM）抓取星川等级/交付项目/星图消耗/电商等级/粉丝数/内容主题标签与前三个视频，主页打不开才降级广场搜索；v3.5 双库口径打分保留：存量库 80 分制、增量/新达人叠加视频分析加分最多+20 封顶100，输出 dataSource/videoBonus/videoAnalysis；无头后台抓取按存量达人逻辑分层打标）",
   "main": "xc-tagger.js",
   "bin": {
     "xc-tagger": "xc-tagger.js"
