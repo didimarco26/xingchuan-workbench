@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.7.1
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.8.0
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，它会：
  *   1) 在 127.0.0.1:7842 起一个本地 HTTP 服务（只监听本机，不对外）；
@@ -16,7 +16,15 @@
  *      扫码/账号密码/验证码均可；成功后写 Cookie 备份、CDP 模式自动关闭窗口，
  *      /health 内存登录位即时生效。超时 5 分钟。
  *   4) 打标：POST /tag 时后台自动重开浏览器（同一配置目录免登录）：
- *      · ★ v3.7.2 主链路改为「服务商详情页直达」：直接冷开服务商端达人详情页
+ *      · ★ v3.8.0 视频画面多模态打标：进「创作能力」tab 拿到前 3 条视频后，自动
+ *        逐个点视频封面、在站内视频弹窗里 seek 抽取 4 张关键帧（每达人最多 12 帧），
+ *        上传云端多模态视觉模型逐帧看画面/场景/人物/产品/字幕/口播，按存量达人库
+ *        闭集口径产出【达人人设/内容形式/画面风格/拍摄场景/行业】5 大标签 +
+ *        主要带货类目 + 近期爆款内容方向 + 打标置信度（高/中/低）+ AI打标建议，
+ *        替代过去仅凭视频标题的启发式推断；画面/场景/类目/置信度以视觉结果为准。
+ *        云端为纯无状态视觉推理、不读内部数据；抽帧/云端失败静默降级标题推断，
+ *        绝不阻塞打标；可用环境变量 XC_VISION=0 关闭视觉打标；
+ *      · v3.7.2 主链路为「服务商详情页直达」：直接冷开服务商端达人详情页
  *        /provider/pages/author/douyin/{达人ID}（服务商 /sup/ 会话下整页 goto 不被
  *        重定向，批量稳定；服务商广场点达人昵称打开的就是这个新 tab 页面），落地后点
  *        顶部 el-tabs「创作能力」tab，拦截 /gw/api/author/get_author_show_items_v2，
@@ -86,6 +94,9 @@ const SQUARE_URL = 'https://www.xingtu.cn/pro/ad/pages/market';
 // 「创作能力」tab 的视频列表 XHR 只在这条站内导航链路下才会触发）。
 // 首选 /provider/pages/market，打不开回退 /pro/ad/pages/market。
 const PROVIDER_MARKET_URL = 'https://www.xingtu.cn/provider/pages/market';
+// v3.8.0：云端多模态打标 FaaS（妙笔公开接口，与公开版网页同源；纯无状态视觉推理，不读内部数据）。
+// 本机工具把视频关键帧上传，云端视觉模型按存量达人库闭集口径产出 7 维标签。失败静默降级标题推断。
+const FAAS_URL = 'https://magic.solutionsuite.cn/api/faas/vu19pYRBTEZ';
 // 登录直达页（v3.6.2）：直接导航服务商端控制台 /sup/。未登录时星图自动 302 到
 // sso.oceanengine.com 统一登录页（redirect_uri 由星图按服务商端编码，role 正确），
 // 登录成功后回跳 /sup/——天然建立服务商端会话。无头扫码同理：goto 后落在 SSO 页点抖音图标。
@@ -1716,13 +1727,176 @@ async function fetchCreatorHome(page, authorId, { debug = false } = {}) {
     }));
 
     if (debug) console.log(`  🐞 主页抓取(${authorId})：资料来源=${via}，视频=${videos.length}个`);
-    return { ok: true, auth, videos, via, reason: 'ok' };
+    // v3.8.0：在「创作能力」tab 依次点前 3 个视频封面 → 站内视频弹窗里 seek 抽帧，
+    // 供云端多模态视觉打标（XC_VISION=0 可关）。抽帧失败静默降级，不影响打分。
+    let frameBundles = [];
+    const visionOn = process.env.XC_VISION !== '0';
+    if (visionOn && videos.length > 0) {
+      try {
+        frameBundles = await captureShowItemFrames(vp, Math.min(3, videos.length), 4);
+        if (debug) console.log(`  🐞 视频抽帧(${authorId})：成功 ${frameBundles.length} 条视频，共 ${frameBundles.reduce((a, b) => a + (b.frames ? b.frames.length : 0), 0)} 帧`);
+      } catch (e) {
+        if (debug) console.log('  ⚠️ 视频抽帧失败(' + authorId + ')：' + friendlyErr(e));
+        frameBundles = [];
+      }
+    }
+    return { ok: true, auth, videos, via, reason: 'ok', frames: frameBundles };
   } catch (e) {
     if (debug) console.log('  ⚠️ 达人主页访问失败(' + authorId + ')：' + friendlyErr(e));
     return fail('error');
   } finally {
     if (vp) await vp.close().catch(() => {});
   }
+}
+
+// ---- v3.8.0 视频抽帧：在创作能力 tab 逐个点封面，站内弹窗播放器 seek 截图 ----------
+// 返回 [{ i, frames:[dataURL,...] }]；任一步失败返回已抽到的帧，绝不抛错阻塞打标。
+async function captureShowItemFrames(vp, maxVideos = 3, perVideo = 4) {
+  const out = [];
+  const clickCover = (idx) => vp.evaluate((idx_) => {
+    const vis = (e) => { try { return e && e.offsetParent !== null && e.offsetWidth >= 150 && e.offsetHeight >= 150; } catch (_) { return false; } };
+    const sels = ['[class*="video-item" i]', '[class*="work-item" i]', '[class*="aweme" i]', '[class*="video-card" i]',
+      '[class*="case-item" i]', '[class*="creative" i][class*="item" i]', '[class*="cover" i]', 'a[href*="video"]', 'a[href*="aweme"]'];
+    let cards = [];
+    for (const s of sels) { cards = Array.from(document.querySelectorAll(s)).filter(vis); if (cards.length >= idx_ + 1) break; }
+    const el = cards[idx_];
+    if (!el) return false;
+    el.scrollIntoView({ block: 'center' });
+    try { el.click(); } catch (_) {}
+    return true;
+  }, idx).catch(() => false);
+
+  const markBestVideo = () => vp.evaluate(() => {
+    const vs = Array.from(document.querySelectorAll('video'))
+      .filter(v => v.offsetWidth >= 280 && v.readyState >= 2 && (v.duration || 0) > 1.5);
+    vs.sort((a, b) => (b.offsetWidth * b.offsetHeight) - (a.offsetWidth * a.offsetHeight));
+    const v = vs[0];
+    if (!v) return false;
+    document.querySelectorAll('video[data-xc-vid]').forEach(x => x.removeAttribute('data-xc-vid'));
+    v.setAttribute('data-xc-vid', '1');
+    try { v.muted = true; } catch (_) {}
+    return true;
+  }).catch(() => false);
+
+  const closeModal = async () => {
+    await vp.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('[class*="close" i],[aria-label*="close" i],button,span,div'));
+      const c = btns.find(b => b.offsetParent !== null &&
+        (/close|关闭|modal|dialog|mask/i.test(b.className || '') || /^(关闭|×|✕|X|x)$/.test((b.innerText || '').trim())));
+      if (c) try { c.click(); } catch (_) {}
+    }).catch(() => {});
+    await vp.keyboard.press('Escape').catch(() => {});
+    await vp.waitForTimeout(600).catch(() => {});
+  };
+
+  const ratios = perVideo >= 5 ? [0.15, 0.35, 0.55, 0.75, 0.92] : [0.2, 0.45, 0.7, 0.9];
+  for (let k = 0; k < maxVideos; k++) {
+    try {
+      const clicked = await clickCover(k);
+      if (!clicked) break;
+      await vp.waitForTimeout(2600).catch(() => {});
+      await waitIfCaptcha(vp, 30000);
+      const has = await markBestVideo();
+      if (!has) { await closeModal(); continue; }
+      const handle = await vp.$('video[data-xc-vid="1"]').catch(() => null);
+      if (!handle) { await closeModal(); continue; }
+      const frames = [];
+      for (const r of ratios) {
+        const seekOk = await vp.evaluate((rr) => {
+          const v = document.querySelector('video[data-xc-vid="1"]');
+          if (!v) return false;
+          try { v.currentTime = Math.max(0, rr * Math.max(1, (v.duration || 30) - 0.1)); } catch (_) {}
+          return true;
+        }, r).catch(() => false);
+        if (!seekOk) break;
+        await vp.waitForTimeout(900).catch(() => {});
+        try {
+          const buf = await handle.screenshot({ type: 'jpeg', quality: 52 });
+          if (buf && buf.length) frames.push('data:image/jpeg;base64,' + buf.toString('base64'));
+        } catch (_) {}
+      }
+      await closeModal();
+      if (frames.length) out.push({ i: k, frames });
+    } catch (_) { await closeModal().catch(() => {}); }
+  }
+  return out;
+}
+
+// ---- v3.8.0 云端多模态视觉打标：关键帧 → creator_video_tag stage → 7 维标签 ----------
+async function callVisionTagging(auth, videos, frameBundles) {
+  try {
+    if (!Array.isArray(frameBundles) || !frameBundles.length) return null;
+    const bundleByI = new Map(frameBundles.map(b => [Number(b.i), b]));
+    const payloadVideos = (videos || []).slice(0, 3).map((v, idx) => {
+      const b = bundleByI.get(idx);
+      return {
+        i: idx,
+        title: v.title || '',
+        url: v.url || '',
+        plays: v.plays || 0,
+        frames: (b && Array.isArray(b.frames)) ? b.frames : [],
+      };
+    }).filter(v => v.frames.length > 0);
+    if (!payloadVideos.length) return null;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 120000);
+    let resp;
+    try {
+      resp = await fetch(FAAS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stage: 'creator_video_tag',
+          source: 'xc-tagger',
+          creator: {
+            name: auth.name || '',
+            id: auth.id || '',
+            fans: auth.fansText || auth.fans || '',
+            starLevel: auth.starLevel || '',
+            ecomLevel: auth.ecomLevel || '',
+            industryHints: Array.isArray(auth.industry) ? auth.industry.slice(0, 6) : [],
+          },
+          videos: payloadVideos,
+        }),
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!resp || !resp.ok) return null;
+    const j = await resp.json().catch(() => null);
+    if (!j || !j.ok || !j.data) return null;
+    return j.data;
+  } catch (_) {
+    return null;
+  }
+}
+
+// v3.8.0：把云端视觉打标结果合并进达人 auth（视觉看到的画面优先）；返回合并后字段
+function mergeVisionTags(auth, vision) {
+  if (!auth || !vision) return null;
+  const unionCap = (a, b, cap) => {
+    const out = [];
+    for (const x of [].concat(Array.isArray(b) ? b : [], Array.isArray(a) ? a : [])) {
+      if (x && !out.includes(x)) out.push(x);
+    }
+    return out.slice(0, cap);
+  };
+  // 画面风格/拍摄场景：视觉模型看到真实画面，直接采用；其余维度视觉在前、XHR/标题推断补后
+  if (Array.isArray(vision.style) && vision.style.length) auth.style = unionCap(auth.style, vision.style, 5);
+  if (Array.isArray(vision.scene) && vision.scene.length) auth.scene = unionCap(auth.scene, vision.scene, 4);
+  if (Array.isArray(vision.forms) && vision.forms.length) auth.forms = unionCap(auth.forms, vision.forms, 6);
+  if (Array.isArray(vision.persona) && vision.persona.length) auth.persona = unionCap(auth.persona, vision.persona, 4);
+  if (Array.isArray(vision.industry) && vision.industry.length) auth.industry = unionCap(auth.industry, vision.industry, 4);
+  return {
+    mainCategory: vision.mainCategory && vision.mainCategory !== '待补充' ? vision.mainCategory : '',
+    hotDirection: vision.hotDirection || '',
+    confidence: vision.confidence || '',
+    why: vision.why || '',
+    aiSuggestion: vision.aiSuggestion || '',
+    perVideo: Array.isArray(vision.perVideo) ? vision.perVideo : [],
+    frameCount: vision.frameCount || 0,
+  };
 }
 
 // 用视频标题/内容形式推断的标签【补充】（不覆盖）达人 forms/persona/industry/style/scene 受控词
@@ -1896,9 +2070,10 @@ function startServer() {
     if (loggedIn) _loggedIn = true;
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.7.1', port: PORT,
+      ok: true, loggedIn, version: '3.8.0', port: PORT,
       loginUrl: SUP_URL,
       marketUrl: PROVIDER_MARKET_URL,
+      vision: true,
       cookiesFile: '.xc-cookies.json',
       cookieCount,
       loginPending: _loginPending,
@@ -2033,6 +2208,7 @@ function startServer() {
       for (const it of items) {
         let auth = null;
         let videoAnalysis = [];
+        let visionFrames = [];
         let via = '';
         // ① 主链路：用达人 ID 直进星图主页
         if (it.id) {
@@ -2040,6 +2216,7 @@ function startServer() {
           if (home && home.ok && home.auth) {
             auth = home.auth;
             videoAnalysis = home.videos || [];
+            visionFrames = home.frames || [];
             via = 'home';
           }
         }
@@ -2058,6 +2235,7 @@ function startServer() {
                 const home = await homeFor(searched.id);
                 if (home) {
                   videoAnalysis = home.videos || [];
+                  if (Array.isArray(home.frames) && home.frames.length) visionFrames = home.frames;
                   if (home.auth) auth = mergeAuth(searched, home.auth);
                 }
               }
@@ -2081,15 +2259,43 @@ function startServer() {
         // v3.5：双库口径（名单「来源」列：存量=stock/增量=increment；缺省按新达人 new）
         const dataSource = it.src === 'stock' || it.src === 'increment' ? it.src : 'new';
         enrichAuthFromVideos(auth, videoAnalysis);
+        // v3.8.0：视频画面多模态打标——抽帧上传云端视觉模型，按真实画面/场景/口播产出 7 维标签。
+        // 失败/无帧静默降级到上面的标题推断口径，绝不阻塞打标。
+        let visionInfo = null;
+        if (Array.isArray(visionFrames) && visionFrames.length) {
+          try {
+            const vision = await callVisionTagging(auth, videoAnalysis, visionFrames);
+            if (vision) {
+              visionInfo = mergeVisionTags(auth, vision);
+              if (visionInfo && Array.isArray(visionInfo.perVideo)) {
+                for (const pv of visionInfo.perVideo) {
+                  const va = videoAnalysis[Number(pv.i)];
+                  if (va) {
+                    if (pv.observe) va.visionObserve = String(pv.observe).slice(0, 120);
+                    if (typeof pv.selling === 'boolean') va.visionSelling = pv.selling;
+                  }
+                }
+              }
+            }
+          } catch (_) { visionInfo = null; }
+        }
         const sc = scoreAuthor(auth, { dataSource, videoAnalysis });
         // v3.7.0：视频链接 / 主要带货类目 / 爆款内容方向 / 置信度
         const insights = buildCreatorInsights(auth, videoAnalysis, via);
+        // v3.8.0：视觉模型看到画面，类目/爆款方向/置信度以视觉结果为准（覆盖标题推断）
+        if (visionInfo) {
+          if (visionInfo.mainCategory) insights.mainCategory = visionInfo.mainCategory;
+          if (visionInfo.hotDirection) insights.hotDirection = visionInfo.hotDirection;
+          if (visionInfo.confidence) insights.confidence = visionInfo.confidence;
+        }
         const reason = sc.reason +
           (via === 'home' ? '\n获取方式: ID直进达人主页' : '\n获取方式: 昵称搜索兜底') +
+          (visionInfo ? '\n打标依据: AI视频画面分析' : '') +
           (insights.mainCategory ? `\n主要带货类目: ${insights.mainCategory}` : '') +
           (insights.hotDirection ? `\n近期爆款方向: ${insights.hotDirection}` : '') +
           ((auth.style || []).length ? `\n画面风格: ${auth.style.join(' ')}` : '') +
           ((auth.scene || []).length ? `\n拍摄场景: ${auth.scene.join(' ')}` : '') +
+          (visionInfo && visionInfo.aiSuggestion ? `\nAI打标建议:\n${visionInfo.aiSuggestion}` : '') +
           `\n打标置信度: ${insights.confidence}`;
         results.push({
           id: auth.id || it.id || '', name: auth.name || it.name || '', found: true,
@@ -2108,6 +2314,9 @@ function startServer() {
           homeUrl: PROVIDER_AUTHOR_URL(auth.id || it.id || ''),
           tags: sc.tags, reason,
           dataSource: sc.dataSource, videoBonus: sc.videoBonus, videoAnalysis,
+          visionTag: !!visionInfo,
+          aiSuggestion: (visionInfo && visionInfo.aiSuggestion) || '',
+          visionFrameCount: (visionInfo && visionInfo.frameCount) || 0,
           via,
         });
       }
@@ -2123,7 +2332,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.7.1');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.8.0（视频画面AI打标）');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
@@ -2205,6 +2414,11 @@ module.exports = {
   PROVIDER_AUTHOR_URL,
   enterProviderAuthorPage,
   pickShowItemVideos,
+  // v3.8.0
+  FAAS_URL,
+  captureShowItemFrames,
+  callVisionTagging,
+  mergeVisionTags,
 };
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
