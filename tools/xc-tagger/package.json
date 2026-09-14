@@ -1,8 +1,8 @@
 {
   "name": "xc-tagger",
-  "version": "3.8.1",
+  "version": "3.9.0",
   "private": true,
-  "description": "星川服务商达人自助打标 · 本地一键工具 v3.8.1（离线包内置 node_modules 解压即用；v3.8.1 视频画面 AI 多模态打标抽帧链路真机校准：点「全部视频」卡片封面 .content-video-card/.video-player-cover 弹 Element UI 视频弹窗，选中播放中的 xgplayer 正片 seek 抽帧，新增 /progress 实时进度条「第 N/M 位」；云端 creator_video_tag 多模态逐帧看画面/场景/人物/产品/字幕/口播，按存量达人库闭集产出 5 大标签（人设/内容形式/画面风格/拍摄场景/行业）+主要带货类目+近期爆款内容方向+置信度+AI打标建议，抽帧/云端失败静默降级，XC_VISION=0 可关；v3.7.x 视频链接走服务商端 /provider/pages/author/douyin/{id} 直达创作能力 tab；登录检测走 /sup/）",
+  "description": "星川服务商达人自助打标 · 本地一键工具 v3.9.0（离线包内置 node_modules 解压即用；v3.9.0 逐条实时上云：/progress 支持 ?since=N 返回增量结果，网页每打完一位达人立即幂等合并写入云端台账，断网/关页面已保存部分不丢；v3.8.1 视频画面多模态打标抽帧链路真机校准，新增 /progress 实时进度条；云端 creator_video_tag 多模态逐帧打标，抽帧/云端失败静默降级，XC_VISION=0 可关）",
   "main": "xc-tagger.js",
   "bin": {
     "xc-tagger": "xc-tagger.js"

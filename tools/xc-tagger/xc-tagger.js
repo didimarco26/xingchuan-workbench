@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.8.1
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.9.0
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，它会：
  *   1) 在 127.0.0.1:7842 起一个本地 HTTP 服务（只监听本机，不对外）；
@@ -695,7 +695,8 @@ const LOGIN_WAIT_MS = 300000; // 登录最长等待 5 分钟
 const LOGIN_POLL_MS = 3000;   // v3.4：每 3 秒主动轮询一次所有标签页 URL
 
 // v3.8.1：打标实时进度（/tag 处理中由循环更新，前端轮询 /progress 渲染进度条）
-let tagProgress = { running: false, total: 0, done: 0, current: '', phase: '', startedAt: 0 };
+// v3.9.0：results 按完成顺序累积，网页轮询 /progress?since=N 拿增量，每完成一位立即上云，断网/关页面不丢
+let tagProgress = { running: false, total: 0, done: 0, current: '', phase: '', startedAt: 0, results: [] };
 
 /**
  * 统一登录流程（自动适配浏览器会话模式）：
@@ -2145,7 +2146,7 @@ function startServer() {
     if (loggedIn) _loggedIn = true;
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.8.1', port: PORT,
+      ok: true, loggedIn, version: '3.9.0', port: PORT,
       loginUrl: SUP_URL,
       marketUrl: PROVIDER_MARKET_URL,
       vision: true,
@@ -2160,8 +2161,12 @@ function startServer() {
   });
 
   // v3.8.1：打标实时进度（前端在 /tag 处理期间每秒轮询，渲染「第 N/M 位」进度条）
-  app.get('/progress', (_req, res) => {
-    res.json({ ok: true, ...tagProgress, vision: process.env.XC_VISION !== '0' });
+  // v3.9.0：支持 ?since=N —— 只返回第 N 条之后新完成的结果，供网页每完成一位立即增量上云
+  app.get('/progress', (req, res) => {
+    const since = Math.max(0, parseInt(req.query.since, 10) || 0);
+    const all = tagProgress.results || [];
+    const inc = since > 0 ? all.slice(since) : all;
+    res.json({ ok: true, ...tagProgress, results: inc, totalDone: all.length, vision: process.env.XC_VISION !== '0' });
   });
 
   // 登录二维码（无头模式专用）：前端登录等待中每 ~2.5s 轮询
@@ -2270,8 +2275,8 @@ function startServer() {
       const results = [];
       const debugVideo = process.env.XC_TAGGER_DEBUG === '1';
       if (debugVideo) console.log('🐞 XC_TAGGER_DEBUG=1：达人主页抓取将落截图、接口 JSON 与 DOM 状态到 .xc-debug/');
-      // v3.8.1：打标实时进度（前端轮询 /progress）
-      tagProgress = { running: true, total: items.length, done: 0, current: '', phase: '准备', startedAt: Date.now() };
+      // v3.8.1：打标实时进度（前端轮询 /progress）；v3.9.0：results 增量供逐条实时上云
+      tagProgress = { running: true, total: items.length, done: 0, current: '', phase: '准备', startedAt: Date.now(), results: [] };
       // v3.6 主链路：① 有 ID 直接进达人主页抓资料+视频；
       //             ② 主页打不开（ID 无效/未入驻/重定向）才用昵称搜达人广场兜底；
       //             ③ 两条路都失败才报「未检索到」。
@@ -2340,6 +2345,7 @@ function startServer() {
             reason: '未能通过 ID 进入主页，昵称搜索也未命中，请核实达人是否入驻星图',
             dataSource: 'new', videoBonus: 0, videoAnalysis: [],
           });
+          tagProgress.results.push(results[results.length - 1]); // v3.9.0 每完成一位立即可供增量上云
           tagProgress.done = _pi + 1;
           continue;
         }
@@ -2407,6 +2413,7 @@ function startServer() {
           visionFrameCount: (visionInfo && visionInfo.frameCount) || 0,
           via,
         });
+        tagProgress.results.push(results[results.length - 1]); // v3.9.0 每完成一位立即可供增量上云
         tagProgress.done = _pi + 1;
       }
       // 按分降序
@@ -2423,7 +2430,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.8.1（视频画面AI打标·真机校准）');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.9.0（逐条实时上云·视频画面AI打标）');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
