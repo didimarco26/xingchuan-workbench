@@ -1,7 +1,18 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v3.9.0
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v4.0.0
+ * ------------------------------------------------------------------
+ * ★ v4.0.0 三条识别路径：名单可提供【星图ID / 达人抖音号 / 达人名称】，
+ *   任一路径命中即进入同一分析链路：
+ *     ① 星图ID → 冷开服务商端达人详情页（原有主链路）；
+ *     ② 达人抖音号 → 达人广场 gsearch 搜索后按抖音号（unique_id / 旧 short_id）
+ *       忽略大小写精确匹配，解析出星图达人ID后走同一主页链路（星图后台可按抖音号识别达人）；
+ *     ③ 达人名称 → 达人广场昵称搜索（原有兜底）。
+ *   登记模板新增「抖音号」列，旧版模板（仅名称/星图ID）导入向下兼容、新列可空；
+ *   名称/抖音号输入容错：去全部空格、忽略 @ 前缀；
+ *   打标结果与导出 CSV 均含「达人抖音号」列（CSV 由 25 列增至 26 列）；
+ *   逐条实时上云 / 云端合并去重同步携带抖音号，云端台账新增「抖音号」字段。
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，它会：
  *   1) 在 127.0.0.1:7842 起一个本地 HTTP 服务（只监听本机，不对外）；
@@ -924,6 +935,11 @@ function pick(obj, patterns) {
   return '';
 }
 function normText(v) { return String(v == null ? '' : v).trim(); }
+// v4.0.0：名称/抖音号输入容错——去全部空白、忽略 @ 前缀（从抖音主页复制常带 @ 与空格）。
+// 名称匹配与抖音号匹配统一先过此函数，保证 "@xxx "、" xxx" 都能命中。
+function cleanHandle(v) {
+  return normText(v).replace(/\s+/g, '').replace(/^@+/, '');
+}
 
 // 粉丝量级档位（与存量/星川达人库「万粉标签」口径一致）
 function fansTierOf(fans) {
@@ -1031,6 +1047,10 @@ function mapAuthor(raw) {
     (blob.match(/(\d{15,20})/) || [])[1] || '';
   // 昵称
   const name = normText(pick(raw, [/nick_?name/i, /author_?name/i, /^name$/i]));
+  // v4.0.0：达人抖音号（抖音 unique_id；short_id 为旧版纯数字抖音号兜底）
+  const shortId = String(pick(raw, [/^short_?id$/i]) || '').trim();
+  const douyin = normText(pick(raw, [/^unique_?id$/i, /douyin_?(id|unique_?id|account|no)$/i,
+    /aweme_?unique_?id/i, /^account_?name$/i, /^account$/i])) || shortId;
   // 粉丝
   const fans = Number(pick(raw, [/fans_?count/i, /follower/i, /^fans$/i, /fans_num/i])) || 0;
   const fansTier = fansTierOf(fans);
@@ -1060,14 +1080,16 @@ function mapAuthor(raw) {
   // v3.7.0：画面风格 / 拍摄场景标签（同样映射存量库受控词表，主页资料信号弱时可留空，后续视频反哺）
   const style = matchControlled(evidence, STOCK_STYLE_RULES, 3);
   const scene = matchControlled(evidence, STOCK_SCENE_RULES, 3);
-  return { id, name, fans, fansTier, sLevel, lLevel, deliveries, consumption, persona, forms, style, scene, industry, category, raw };
+  return { id, name, douyin, fans, fansTier, sLevel, lLevel, deliveries, consumption, persona, forms, style, scene, industry, category, raw };
 }
 
-// 按昵称搜索达人
-async function searchByName(page, kw) {
+// 达人广场搜索（返回映射后的候选达人列表）；v4.0.0 抽成公共函数，供昵称/抖音号两条路径复用。
+async function searchAuthors(page, kw, size = 10) {
+  const q = cleanHandle(kw);
+  if (!q) return [];
   const payloads = [
-    { keyword: kw, query: kw, page: 1, size: 10, offset: 0, limit: 10 },
-    { search_keyword: kw, keyword: kw, page_no: 1, page_size: 10 },
+    { keyword: q, query: q, page: 1, size, offset: 0, limit: size },
+    { search_keyword: q, keyword: q, page_no: 1, page_size: size },
   ];
   for (const body of payloads) {
     try {
@@ -1075,13 +1097,37 @@ async function searchByName(page, kw) {
       if (DEBUG_DUMP) fs.writeFileSync(path.join(__dirname, `debug_search_${Date.now()}.json`), JSON.stringify(r.json, null, 2));
       const authors = [];
       deepCollectAuthors(r.json, authors, 0);
-      const mapped = authors.map(mapAuthor).filter(a => a.name);
-      if (mapped.length) {
-        // 昵称完全匹配优先
-        mapped.sort((a, b) => (b.name === kw ? 1 : 0) - (a.name === kw ? 1 : 0));
-        return mapped[0];
-      }
+      const mapped = authors.map(mapAuthor).filter(a => a.name || a.douyin);
+      if (mapped.length) return mapped;
     } catch (_) { /* 试下一种 payload */ }
+  }
+  return [];
+}
+
+// 按昵称搜索达人
+async function searchByName(page, kw) {
+  const q = cleanHandle(kw);
+  if (!q) return null;
+  const mapped = await searchAuthors(page, q, 10);
+  if (!mapped.length) return null;
+  // 昵称完全匹配优先；否则取首个候选
+  mapped.sort((a, b) => (cleanHandle(b.name) === q ? 1 : 0) - (cleanHandle(a.name) === q ? 1 : 0));
+  return mapped[0];
+}
+
+// v4.0.0：按达人抖音号精确搜索——广场搜索后按抖音号（unique_id / 旧 short_id）
+// 忽略大小写精确比对；命中唯一即返回，避免相似昵称误匹配；不唯一时不猜。
+async function searchByDouyin(page, handle) {
+  const q = cleanHandle(handle);
+  const want = q.toLowerCase();
+  if (!want) return null;
+  const mapped = await searchAuthors(page, q, 20);
+  const exact = mapped.filter(a => cleanHandle(a.douyin).toLowerCase() === want);
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) {
+    // 理论上抖音号唯一；多个时取昵称与输入相同者，仍不确定则放弃（不猜）
+    const named = exact.filter(a => cleanHandle(a.name) === q);
+    return named.length === 1 ? named[0] : null;
   }
   return null;
 }
@@ -1401,6 +1447,7 @@ function mergeAuth(base, extra) {
   const out = Object.assign({}, base);
   const union = (a, b) => Array.from(new Set([...(a || []), ...(b || [])]));
   if (!out.name && extra.name) out.name = extra.name;
+  if (!out.douyin && extra.douyin) out.douyin = extra.douyin; // v4.0.0 抖音号补全
   if (!out.sLevel && extra.sLevel) out.sLevel = extra.sLevel;
   if (!out.lLevel && extra.lLevel) out.lLevel = extra.lLevel;
   if ((!out.fans || out.fans === 0) && extra.fans) out.fans = extra.fans;
@@ -2071,12 +2118,14 @@ function parseListBuffer(buf, filename) {
   const rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
   if (!rows.length) return { items: [], headers: [] };
   const headers = Object.keys(rows[0]);
-  const idKey = headers.find(h => /id|达人id|星图id|uid|编号/i.test(h));
-  // 昵称列：跳过 ID 列（「星图达人ID」也含「达人」二字，不能误选）
-  const nameKey = headers.find(h => h !== idKey && /昵称|名字|达人名|账号名|name|主播|达人/i.test(h)) ||
-    headers.find(h => h !== idKey);
+  // v4.0.0：抖音号列（优先识别，避免被 ID 列的 /id/ 正则抢走，如表头「抖音ID」）
+  const douyinKey = headers.find(h => /抖音|douyin|unique_?id|抖音号|抖音账号/i.test(h));
+  const idKey = headers.find(h => h !== douyinKey && /id|达人id|星图id|uid|编号/i.test(h));
+  // 昵称列：跳过 ID 列与抖音号列（「星图达人ID」也含「达人」二字，不能误选）
+  const nameKey = headers.find(h => h !== idKey && h !== douyinKey && /昵称|名字|达人名|账号名|name|主播|达人/i.test(h)) ||
+    headers.find(h => h !== idKey && h !== douyinKey);
   // v3.5：数据来源列（存量/增量），用于双库口径打分；可缺省（默认按新达人）
-  const srcKey = headers.find(h => h !== idKey && /来源|数据源|库别|所属库|名单类型/i.test(h));
+  const srcKey = headers.find(h => h !== idKey && h !== douyinKey && /来源|数据源|库别|所属库|名单类型/i.test(h));
   const normSrc = (v) => {
     const s = normText(v).toLowerCase();
     if (/存量|库存|已合作|stock/.test(s)) return 'stock';
@@ -2086,16 +2135,19 @@ function parseListBuffer(buf, filename) {
   const items = [];
   rows.forEach((r, i) => {
     let id = idKey ? normText(r[idKey]) : '';
-    let name = nameKey ? normText(r[nameKey]) : '';
+    let name = nameKey ? cleanHandle(r[nameKey]) : '';
+    let douyin = douyinKey ? cleanHandle(r[douyinKey]) : '';
     // 单列兜底：纯数字当 ID，否则当昵称
-    if (!id && !name) {
+    if (!id && !name && !douyin) {
       const v = normText(Object.values(r)[0]);
-      if (/^\d{12,}$/.test(v)) id = v; else name = v;
+      if (/^\d{12,}$/.test(v)) id = v; else name = cleanHandle(v);
     }
     const idDigits = (id.match(/\d{12,}/) || [])[0] || '';
     if (idDigits) id = idDigits;
+    // 抖音号列里若误填了星图ID（12位以上纯数字），直接归入 ID
+    if (!id && /^\d{12,}$/.test(douyin)) { id = douyin; douyin = ''; }
     const src = srcKey ? normSrc(r[srcKey]) : '';
-    if (id || name) items.push({ id, name, row: i + 2, src });
+    if (id || name || douyin) items.push({ id, name, douyin, row: i + 2, src });
   });
   return { items, headers };
 }
@@ -2295,7 +2347,7 @@ function startServer() {
       for (let _pi = 0; _pi < items.length; _pi++) {
         const it = items[_pi];
         tagProgress.done = _pi;
-        tagProgress.current = it.name || it.id || `第${_pi + 1}位`;
+        tagProgress.current = it.name || it.id || it.douyin || `第${_pi + 1}位`;
         tagProgress.phase = '抓取达人主页与视频画面（视频抽帧较慢，请耐心等待）';
         let auth = null;
         let videoAnalysis = [];
@@ -2311,7 +2363,25 @@ function startServer() {
             via = 'home';
           }
         }
-        // ② 兜底：昵称搜索达人广场（主页打不开 / 名单只有昵称）
+        // ② v4.0.0：抖音号精确匹配（星图ID打不开 / 名单只给抖音号时，先于名称路径）
+        if (!auth && it.douyin) {
+          let hit = null;
+          try { hit = await searchByDouyin(page, String(it.douyin)); } catch (_) { hit = null; }
+          await sleep(300);
+          if (hit && hit.id) {
+            via = 'douyin';
+            // 与名称路径一致：进一次主页抓视频 + 用主页资料补空字段（走缓存不重复访问）
+            const home = await homeFor(hit.id);
+            if (home) {
+              videoAnalysis = home.videos || [];
+              if (Array.isArray(home.frames) && home.frames.length) visionFrames = home.frames;
+              auth = home.auth ? mergeAuth(hit, home.auth) : hit;
+            } else {
+              auth = hit;
+            }
+          }
+        }
+        // ③ 兜底：昵称搜索达人广场（主页打不开 / 名单只有昵称）
         if (!auth) {
           const kw = it.name || it.id;
           if (kw) {
@@ -2333,16 +2403,16 @@ function startServer() {
             }
           }
         }
-        // ③ 两条路都失败
+        // ④ 三条路都失败
         if (!auth) {
           results.push({
-            id: it.id || '', name: it.name || '(未命名)', found: false, score: 0, tier: '储备', medal: '⚪',
+            id: it.id || '', name: it.name || '(未命名)', douyin: it.douyin || '', found: false, score: 0, tier: '储备', medal: '⚪',
             sLevel: '', lLevel: '', deliveries: 0, consumption: 0, fans: 0, fansTier: '',
             persona: [], forms: [], style: [], scene: [], industry: [], category: '',
             videoLinks: [], mainCategory: '', hotDirection: '', confidence: '低',
             homeUrl: it.id ? PROVIDER_AUTHOR_URL(it.id) : '',
             tags: ['未检索到'],
-            reason: '未能通过 ID 进入主页，昵称搜索也未命中，请核实达人是否入驻星图',
+            reason: '未能通过星图ID进入主页，抖音号精确匹配、昵称搜索均未命中，请核实抖音号是否正确、达人是否入驻星图',
             dataSource: 'new', videoBonus: 0, videoAnalysis: [],
           });
           tagProgress.results.push(results[results.length - 1]); // v3.9.0 每完成一位立即可供增量上云
@@ -2383,7 +2453,8 @@ function startServer() {
           if (visionInfo.confidence) insights.confidence = visionInfo.confidence;
         }
         const reason = sc.reason +
-          (via === 'home' ? '\n获取方式: ID直进达人主页' : '\n获取方式: 昵称搜索兜底') +
+          (via === 'home' ? '\n获取方式: 星图ID直进达人主页' :
+            via === 'douyin' ? '\n获取方式: 抖音号精确匹配' : '\n获取方式: 名称搜索') +
           (visionInfo ? '\n打标依据: AI视频画面分析' : '') +
           (insights.mainCategory ? `\n主要带货类目: ${insights.mainCategory}` : '') +
           (insights.hotDirection ? `\n近期爆款方向: ${insights.hotDirection}` : '') +
@@ -2392,7 +2463,8 @@ function startServer() {
           (visionInfo && visionInfo.aiSuggestion ? `\nAI打标建议:\n${visionInfo.aiSuggestion}` : '') +
           `\n打标置信度: ${insights.confidence}`;
         results.push({
-          id: auth.id || it.id || '', name: auth.name || it.name || '', found: true,
+          id: auth.id || it.id || '', name: auth.name || it.name || '',
+          douyin: auth.douyin || it.douyin || '', found: true,
           score: sc.score, tier: sc.tier, medal: sc.medal,
           sLevel: auth.sLevel, lLevel: auth.lLevel,
           deliveries: auth.deliveries, consumption: auth.consumption,
@@ -2430,7 +2502,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v3.9.0（逐条实时上云·视频画面AI打标）');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v4.0.0（抖音号三路匹配·逐条实时上云·视频画面AI打标）');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
@@ -2517,6 +2589,13 @@ module.exports = {
   captureShowItemFrames,
   callVisionTagging,
   mergeVisionTags,
+  // v4.0.0
+  mapAuthor,
+  searchAuthors,
+  searchByName,
+  searchByDouyin,
+  parseListBuffer,
+  cleanHandle,
 };
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

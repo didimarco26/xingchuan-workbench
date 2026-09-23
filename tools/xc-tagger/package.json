@@ -1,8 +1,8 @@
 {
   "name": "xc-tagger",
-  "version": "3.9.0",
+  "version": "4.0.0",
   "private": true,
-  "description": "星川服务商达人自助打标 · 本地一键工具 v3.9.0（离线包内置 node_modules 解压即用；v3.9.0 逐条实时上云：/progress 支持 ?since=N 返回增量结果，网页每打完一位达人立即幂等合并写入云端台账，断网/关页面已保存部分不丢；v3.8.1 视频画面多模态打标抽帧链路真机校准，新增 /progress 实时进度条；云端 creator_video_tag 多模态逐帧打标，抽帧/云端失败静默降级，XC_VISION=0 可关）",
+  "description": "星川服务商达人自助打标 · 本地一键工具 v4.0.0（离线包内置 node_modules 解压即用；v4.0.0 三条识别路径：星图ID / 达人抖音号 / 达人名称任一命中即进入同一分析链路，抖音号经达人广场搜索按 unique_id 精确匹配；登记模板新增「抖音号」列且旧版模板向下兼容；结果 CSV 新增「达人抖音号」列（26列）；名称/抖音号输入容错去空格忽略@；逐条实时上云同步抖音号；v3.9.0 逐条实时上云 /progress ?since=N 增量结果，断网不丢；v3.8.1 视频画面多模态打标抽帧真机校准；XC_VISION=0 可关）",
   "main": "xc-tagger.js",
   "bin": {
     "xc-tagger": "xc-tagger.js"
