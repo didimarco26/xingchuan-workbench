@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 星川服务商达人打标工具 · Mac 一键启动（v4.1.0）
+# 星川服务商达人打标工具 · Mac 一键启动（v4.1.1）
 # ★ 零安装：无需自己安装 Node.js —— 系统没有 Node 时，本脚本会
 #   按你的芯片（Apple Silicon / Intel）自动下载官方 Node 运行环境
 #   （约 37MB，仅首次运行需要，从国内可直连的火山引擎 TOS 下载，
@@ -12,7 +12,7 @@
 
 cd "$(dirname "$0")" || exit 1
 RUN_DIR="$(pwd)"
-APP_VERSION="4.1.0"
+APP_VERSION="4.1.1"
 NODE_VERSION="v22.23.2"
 NODE_MAJOR_MIN=18
 RUNTIME_DIR="$RUN_DIR/node-runtime"

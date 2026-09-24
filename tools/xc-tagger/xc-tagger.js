@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v4.1.0
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v4.1.1
+ * v4.1.1 抖音号匹配修复：抖音号搜索改走服务商广场专用接口
+ *   /gw/api/gsearch/basic_search_authors（seach_type=101，完整信封
+ *   scene_param + search_param + page_param + sort_param）。v4.0.0 误用
+ *   浏览/推荐接口 search_for_author_square 且 body 扁平，导致仅填抖音号
+ *   的名单全部「未检索到」（是工具 bug，不是达人未入驻）。
+ *   字母/短抖音号的模糊召回按「第一条 + 名称一致性」过滤；接口不支持批量，逐条调用。
  * v4.1.0 Mac 零安装：系统无 Node 18+ 时启动脚本自动按芯片（arm64/x64）下载
  * 官方 Node 运行环境（TOS 主源 + npmmirror / nodejs.org 兜底，免管理员密码）；
  * 同时识别 /opt/homebrew/bin（brew 安装）与 /usr/local/bin（官方 pkg）下的 Node。
@@ -1120,19 +1126,73 @@ async function searchByName(page, kw) {
 
 // v4.0.0：按达人抖音号精确搜索——广场搜索后按抖音号（unique_id / 旧 short_id）
 // 忽略大小写精确比对；命中唯一即返回，避免相似昵称误匹配；不唯一时不猜。
-async function searchByDouyin(page, handle) {
+// v4.1.1 修正：抖音号必须走服务商广场专用接口 basic_search_authors（seach_type=101）。
+// 旧实现复用 searchAuthors（search_for_author_square 浏览/推荐接口 + 扁平 body），
+// 后端按昵称推荐处理，仅填抖音号的名单必然全部落空。
+const GSEARCH_SCENE = {
+  platform_source: 1, search_scene: 1, display_scene: 1,
+  marketing_target: 1, task_category: 1, first_industry_id: 0, task_status: 3,
+};
+// basic_search_authors 单条结果 -> 内部 auth 结构（星图ID/昵称/抖音号/粉丝/等级）。
+// 该搜索响应为精简资料：star_id + attribute_datas（nick_name/unique_id/short_id/
+// fans_count/author_ecom_level/grade 等），消耗与交付数不在响应里，先留空，
+// 命中后仍进达人主页用完整资料 mergeAuth 补齐。
+function mapGsearchAuthor(row) {
+  const d = (row && row.attribute_datas) || {};
+  const flat = {
+    author_id: row.star_id,
+    nick_name: d.nick_name || d.author_nick_name,
+    unique_id: d.unique_id || d.author_unique_id,
+    short_id: d.short_id,
+    fans_count: d.fans_count || d.follower_count || d.follower,
+    author_ecom_level: d.author_ecom_level,
+    grade: d.grade,
+  };
+  return mapAuthor(flat);
+}
+
+// 服务商广场统一搜索（basic_search_authors）。seachType：
+// 100=星图ID、101=抖音号、102=昵称、103=内容。只能逐条调用，接口不支持批量。
+async function basicSearchAuthors(page, kw, seachType, size = 20) {
+  const q = cleanHandle(kw);
+  if (!q) return [];
+  const body = {
+    scene_param: GSEARCH_SCENE,
+    search_param: { seach_type: seachType, keyword: q },
+    page_param: { page: 1, limit: size },
+    sort_param: { sort_type: 2, sort_field: { field_name: 'score' } },
+  };
+  const r = await xgFetch(page, '/gw/api/gsearch/basic_search_authors', body);
+  if (DEBUG_DUMP) fs.writeFileSync(path.join(__dirname, `debug_gsearch_${Date.now()}.json`), JSON.stringify(r.json, null, 2));
+  const rows = r.json && Array.isArray(r.json.authors) ? r.json.authors : [];
+  return rows.map(mapGsearchAuthor).filter(a => a && (a.name || a.douyin));
+}
+
+// 按抖音号搜索达人（seach_type=101）。
+// 数字抖音号通常精确召回 1 条；字母/短抖音号可能有模糊召回（如 L58623480 返回
+// 3 条），过滤口径：
+//   ① unique_id/short_id 忽略大小写与输入完全一致——唯一即返回；
+//   ② 多条精确时，用名单里的达人名称做一致性校验，仍不确定则取排序第一；
+//   ③ 无完全一致（模糊召回）——后端按相关度排序取第一条；若名单给了名称，
+//      第一条名称须一致才采用，避免张冠李戴；没给名称则信任排序。
+async function searchByDouyin(page, handle, nameHint) {
   const q = cleanHandle(handle);
   const want = q.toLowerCase();
   if (!want) return null;
-  const mapped = await searchAuthors(page, q, 20);
+  const mapped = await basicSearchAuthors(page, q, 101, 20);
+  if (!mapped.length) return null;
   const exact = mapped.filter(a => cleanHandle(a.douyin).toLowerCase() === want);
   if (exact.length === 1) return exact[0];
   if (exact.length > 1) {
-    // 理论上抖音号唯一；多个时取昵称与输入相同者，仍不确定则放弃（不猜）
-    const named = exact.filter(a => cleanHandle(a.name) === q);
-    return named.length === 1 ? named[0] : null;
+    if (nameHint) {
+      const named = exact.filter(a => cleanHandle(a.name) === cleanHandle(nameHint));
+      if (named.length === 1) return named[0];
+    }
+    return exact[0]; // 抖音号理论上唯一，排序第一优先；不臆造后面的
   }
-  return null;
+  const first = mapped[0];
+  if (nameHint) return cleanHandle(first.name) === cleanHandle(nameHint) ? first : null;
+  return first;
 }
 
 // v3.6：打标主链路不再走批量资料接口——直接用达人 ID 进创作者主页抓取
@@ -2201,7 +2261,7 @@ function startServer() {
     if (loggedIn) _loggedIn = true;
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '4.1.0', port: PORT,
+      ok: true, loggedIn, version: '4.1.1', port: PORT,
       loginUrl: SUP_URL,
       marketUrl: PROVIDER_MARKET_URL,
       vision: true,
@@ -2369,7 +2429,7 @@ function startServer() {
         // ② v4.0.0：抖音号精确匹配（星图ID打不开 / 名单只给抖音号时，先于名称路径）
         if (!auth && it.douyin) {
           let hit = null;
-          try { hit = await searchByDouyin(page, String(it.douyin)); } catch (_) { hit = null; }
+          try { hit = await searchByDouyin(page, String(it.douyin), it.name); } catch (_) { hit = null; }
           await sleep(300);
           if (hit && hit.id) {
             via = 'douyin';
@@ -2505,7 +2565,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v4.1.0（零安装Node自动就绪·抖音号三路匹配·逐条实时上云·视频画面AI打标）');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v4.1.1（零安装Node自动就绪·抖音号专用检索修复·逐条实时上云·视频画面AI打标）');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
