@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v4.0.0
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v4.1.0
+ * v4.1.0 Mac 零安装：系统无 Node 18+ 时启动脚本自动按芯片（arm64/x64）下载
+ * 官方 Node 运行环境（TOS 主源 + npmmirror / nodejs.org 兜底，免管理员密码）；
+ * 同时识别 /opt/homebrew/bin（brew 安装）与 /usr/local/bin（官方 pkg）下的 Node。
  * ------------------------------------------------------------------
  * ★ v4.0.0 三条识别路径：名单可提供【星图ID / 达人抖音号 / 达人名称】，
  *   任一路径命中即进入同一分析链路：
@@ -2198,7 +2201,7 @@ function startServer() {
     if (loggedIn) _loggedIn = true;
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '3.9.0', port: PORT,
+      ok: true, loggedIn, version: '4.1.0', port: PORT,
       loginUrl: SUP_URL,
       marketUrl: PROVIDER_MARKET_URL,
       vision: true,
@@ -2502,7 +2505,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v4.0.0（抖音号三路匹配·逐条实时上云·视频画面AI打标）');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v4.1.0（零安装Node自动就绪·抖音号三路匹配·逐条实时上云·视频画面AI打标）');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
