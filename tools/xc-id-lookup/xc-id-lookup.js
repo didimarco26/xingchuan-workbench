@@ -637,7 +637,7 @@ async function xgFetch(page, api, body, method = 'POST') {
       const resp = await fetch(origin + api, {
         method,
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/plain, */F' },
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/plain, */*' },
         body: method === 'GET' ? undefined : JSON.stringify(body || {}),
       });
       const text = await resp.text();
