@@ -1,0 +1,21 @@
+{
+  "name": "xc-id-lookup",
+  "version": "1.0.0",
+  "private": true,
+  "description": "星川服务商达人信息互查 · 本地一键工具 v1.0.0（上传含抖音号/星图ID/达人名称任意列的 Excel，复用本机已登录星图浏览器批量补全三元组：抖音号+星图ID+达人名称，导出 Excel/CSV；只做身份补全不打分；星图ID直达 /xingtu/author/{id}/，抖音号走 basic_search_authors seach_type=101，名称走 seach_type=0；CDP 优先无头扫码兜底；Mac 零安装 Node）",
+  "main": "xc-id-lookup.js",
+  "bin": {
+    "xc-id-lookup": "xc-id-lookup.js"
+  },
+  "scripts": {
+    "start": "node xc-id-lookup.js",
+    "test": "node test-logic.js",
+    "setup": "playwright install chromium"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "playwright": "1.49.1",
+    "xlsx": "^0.18.5"
+  }
+}
