@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人信息互查 · 本地一键工具 (xc-id-lookup) v1.0.0
+ * 星川服务商达人信息互查 · 本地一键工具 (xc-id-lookup) v1.1.0
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，上传达人 Excel（列可以是
  *   【抖音号 / 星图ID / 达人名称】中的任意一列或多列，不必齐全），
@@ -36,7 +36,7 @@ const XLSX = require('xlsx');
 const fs = require('fs');
 
 // ---- 配置 ----------------------------------------------------------------
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const PORT = 7843;
 const HOST = '127.0.0.1';
 // 登录态文件与独立配置目录（与 xc-tagger 各自独立，可共存于同一台电脑）
@@ -1070,7 +1070,7 @@ function buildExportRows(headers, results) {
 
 function resultOk(it, r, via) {
   return {
-    row: it.row, orig: it.orig,
+    row: it.row, orig: it.orig, recordId: it.recordId || '',
     input: { id: it.id || '', douyin: it.douyin || '', name: it.name || '' },
     id: r.id || '', douyin: r.douyin || '', name: r.name || '',
     found: true, via, note: '',
@@ -1078,7 +1078,7 @@ function resultOk(it, r, via) {
 }
 function resultFail(it, inId, inDy, inNm, note) {
   return {
-    row: it.row, orig: it.orig,
+    row: it.row, orig: it.orig, recordId: it.recordId || '',
     input: { id: inId, douyin: inDy, name: inNm },
     id: inId, douyin: inDy, name: inNm,
     found: false, via: '', note,
