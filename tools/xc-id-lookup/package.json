@@ -1,8 +1,8 @@
 {
   "name": "xc-id-lookup",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
-  "description": "星川服务商达人信息互查 · 本地一键工具 v1.2.0（★断点续跑：每完成一行立即本地落盘 .xc-checkpoints/，中断重开自动按名单指纹识别未完成任务，可继续或放弃，已完成行不重复请求；v1.1.0 起支持两种来源：①多维表格直连，粘贴 Base 链接读取、互查后一键写回；②上传含抖音号/星图ID/达人名称任意列的 Excel。复用本机已登录星图浏览器批量补全三元组：抖音号+星图ID+达人名称，可导出 Excel/CSV；只做身份补全不打分；星图ID直达 /xingtu/author/{id}/，抖音号走 basic_search_authors seach_type=101，名称走 seach_type=0；CDP 优先无头扫码兜底；Mac 零安装 Node）",
+  "description": "星川服务商达人信息互查 · 本地后台服务 v1.2.1（★面板集成：上传/互查/写回全部在服务商对外工作台面板内完成，启动后不再自动打开本地网页，XC_ID_OPEN=1 可用旧页面；v1.2.0 断点续跑：每完成一行立即本地落盘 .xc-checkpoints/，中断重开自动按名单指纹识别未完成任务，可继续或放弃，已完成行不重复请求；v1.1.0 起支持两种来源：①多维表格直连，粘贴 Base 链接读取、互查后一键写回；②上传含抖音号/星图ID/达人名称任意列的 Excel。复用本机已登录星图浏览器批量补全三元组：抖音号+星图ID+达人名称；只做身份补全不打分；CDP 优先无头扫码兜底；Mac 零安装 Node）",
   "main": "xc-id-lookup.js",
   "bin": {
     "xc-id-lookup": "xc-id-lookup.js"

@@ -38,7 +38,7 @@ const XLSX = require('xlsx');
 const fs = require('fs');
 
 // ---- 配置 ----------------------------------------------------------------
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 const PORT = 7843;
 const HOST = '127.0.0.1';
 // 登录态文件与独立配置目录（与 xc-tagger 各自独立，可共存于同一台电脑）
@@ -1397,13 +1397,15 @@ if (require.main === module) {
     const url = `http://${HOST}:${PORT}`;
     console.log('');
     console.log('============================================================');
-    console.log(`  xc-id-lookup 达人信息互查 v${VERSION} 已启动`);
-    console.log(`  本地服务地址：${url}（仅本机可访问）`);
+    console.log(`  xc-id-lookup 星图达人本地化查询/匹配 v${VERSION} 已启动`);
+    console.log(`  后台服务地址：${url}（仅本机可访问，无需打开该页面）`);
+    console.log('  请回到「服务商对外工作台」网页内直接使用：上传名单 / 互查 / 写回');
     console.log('  保持本窗口开启；关闭窗口（或 Ctrl+C）即停止工具。');
     console.log('============================================================');
     console.log('');
-    // 自动打开工具网页
-    openBrowser(url);
+    // v1.2.1：不再自动打开本地网页——所有操作均在对外工作台面板内完成。
+    // 如需使用旧的本地独立页面，设置环境变量 XC_ID_OPEN=1 后启动即可。
+    if (process.env.XC_ID_OPEN === '1') openBrowser(url);
   });
 }
 
