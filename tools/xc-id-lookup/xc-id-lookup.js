@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人信息互查 · 本地一键工具 (xc-id-lookup) v1.1.0
+ * 星川服务商达人信息互查 · 本地一键工具 (xc-id-lookup) v1.2.0
+ * v1.2.0 断点续跑：每完成一行立即落盘 .xc-checkpoints/，中断重开按名单指纹识别，
+ *       可继续未完成行或放弃断点重新开始，已完成行不重复请求。
  * ------------------------------------------------------------------
  * 用途：服务商在本机运行本工具，上传达人 Excel（列可以是
  *   【抖音号 / 星图ID / 达人名称】中的任意一列或多列，不必齐全），
@@ -36,7 +38,7 @@ const XLSX = require('xlsx');
 const fs = require('fs');
 
 // ---- 配置 ----------------------------------------------------------------
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const PORT = 7843;
 const HOST = '127.0.0.1';
 // 登录态文件与独立配置目录（与 xc-tagger 各自独立，可共存于同一台电脑）
@@ -45,6 +47,9 @@ const CHROME_PROFILE_DIR = path.resolve(__dirname, '.xc-id-chrome-profile');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DEBUG_DUMP = process.env.XC_ID_DEBUG === '1';
 const DEBUG_DIR = path.resolve(__dirname, '.xc-id-debug');
+// 断点续跑：每条完成立即落盘的检查点目录
+const ck = require('./xc-checkpoint');
+const CHECKPOINT_DIR = path.resolve(__dirname, '.xc-checkpoints');
 
 const XINGTU_ORIGIN = 'https://www.xingtu.cn';
 // 服务商端控制台首页 = 登录引导/判定页（服务商账号必须从 /sup/ 端建立会话）
@@ -1180,7 +1185,15 @@ app.get('/vendor/xlsx.full.min.js', (req, res) => {
 
 // 互查任务状态
 let lookupProgress = { running: false, total: 0, done: 0, current: null, phase: '' };
+// 结果按行号(row)存储，读取时按行排序（断点恢复 + 新增合并后顺序不乱）
+let resultMap = {};
 let lookupResults = [];
+function allResults() {
+  return Object.keys(resultMap)
+    .map(Number)
+    .sort((a, b) => a - b)
+    .map((k) => resultMap[k]);
+}
 
 // GET /health — 登录态 + 任务状态
 app.get('/health', async (req, res) => {
@@ -1257,13 +1270,53 @@ app.post('/parse', (req, res) => {
   }
 });
 
-// POST /lookup — 逐行三路互查（异步执行，前端轮询 /progress）
+// POST /checkpoint/peek — 载入名单后探测是否存在未完成断点
+app.post('/checkpoint/peek', (req, res) => {
+  const items = Array.isArray(req.body && req.body.items) ? req.body.items : [];
+  if (!items.length) return res.json({ found: false });
+  const source = String((req.body && req.body.source) || 'file');
+  const jid = ck.computeJobId('xc-id-lookup', source, items);
+  res.json(ck.peek(CHECKPOINT_DIR, jid) || { found: false });
+});
+
+// POST /checkpoint/discard — 用户选择「重新开始」时清除断点
+app.post('/checkpoint/discard', (req, res) => {
+  const items = Array.isArray(req.body && req.body.items) ? req.body.items : [];
+  const source = String((req.body && req.body.source) || 'file');
+  if (items.length) ck.discard(CHECKPOINT_DIR, ck.computeJobId('xc-id-lookup', source, items));
+  res.json({ ok: true });
+});
+
+// POST /lookup — 逐行三路互查（支持断点续跑；异步执行，前端轮询 /progress）
 app.post('/lookup', async (req, res) => {
   if (lookupProgress.running) {
     return res.status(409).json({ ok: false, error: '已有互查任务在执行中。' });
   }
   const items = Array.isArray(req.body && req.body.items) ? req.body.items : [];
   if (!items.length) return res.status(400).json({ ok: false, error: '名单为空。' });
+  const source = String((req.body && req.body.source) || 'file');
+  const meta = (req.body && req.body.meta) || {};
+  const wantResume = !!(req.body && req.body.resume);
+  const jid = ck.computeJobId('xc-id-lookup', source, items);
+
+  let cp = wantResume ? ck.load(CHECKPOINT_DIR, jid) : null;
+  if (!wantResume) ck.discard(CHECKPOINT_DIR, jid);
+  if (!cp) cp = ck.createCp({ tool: 'xc-id-lookup', source, total: items.length, meta });
+
+  resultMap = {};
+  const restored = cp.results || {};
+  for (const k of Object.keys(restored)) resultMap[k] = restored[k];
+  lookupResults = allResults();
+  const restoredCount = Object.keys(restored).length;
+  const remaining = items.filter((it) => !restored[String(it.row)]);
+
+  // 无剩余行：断点里已全部完成，无需登录/检索，直接交付已有结果
+  if (!remaining.length) {
+    cp.finished = true;
+    ck.save(CHECKPOINT_DIR, jid, cp);
+    lookupProgress = { running: false, total: items.length, done: items.length, current: null, phase: '完成' };
+    return res.json({ ok: true, total: items.length, restored: restoredCount, finished: true });
+  }
 
   let sess = null;
   try { sess = await acquireSession(); }
@@ -1277,9 +1330,8 @@ app.post('/lookup', async (req, res) => {
     return res.status(401).json({ ok: false, error: '星图登录态已失效，请重新点击「登录星图」后再开始。' });
   }
 
-  lookupResults = [];
-  lookupProgress = { running: true, total: items.length, done: 0, current: null, phase: '' };
-  res.json({ ok: true, total: items.length });
+  lookupProgress = { running: true, total: items.length, done: restoredCount, current: null, phase: '' };
+  res.json({ ok: true, total: items.length, restored: restoredCount });
 
   const caches = { id: new Map(), dy: new Map(), nm: new Map() };
   (async () => {
@@ -1288,22 +1340,28 @@ app.post('/lookup', async (req, res) => {
       if (it.douyin) return '抖音号精确检索';
       return '名称模糊检索';
     };
-    for (const it of items) {
+    for (const it of remaining) {
       lookupProgress.current = it.row;
       lookupProgress.phase = phaseOf(it);
+      let r;
       try {
-        const r = await resolveItem(page, it, caches);
-        lookupResults.push(r);
+        r = await resolveItem(page, it, caches);
       } catch (e) {
-        lookupResults.push(resultFail(it, it.id || '', it.douyin || '', it.name || '', '检索异常：' + friendlyErr(e)));
+        r = resultFail(it, it.id || '', it.douyin || '', it.name || '', '检索异常：' + friendlyErr(e));
       }
+      resultMap[String(it.row)] = r;
+      cp.results[String(it.row)] = r;
+      ck.save(CHECKPOINT_DIR, jid, cp); // 每条完成立即落盘
+      lookupResults = allResults();
       lookupProgress.done++;
     }
+    cp.finished = true;
+    ck.save(CHECKPOINT_DIR, jid, cp);
     lookupProgress.running = false;
     lookupProgress.current = null;
     lookupProgress.phase = '完成';
-    const okN = lookupResults.filter(r => r.found).length;
-    console.log(`✅ 互查完成：${lookupResults.length} 行，成功 ${okN}，未检索到 ${lookupResults.length - okN}。`);
+    const okN = lookupResults.filter((r) => r.found).length;
+    console.log(`✅ 互查完成（含断点恢复 ${restoredCount} 行）：${lookupResults.length} 行，成功 ${okN}，未检索到 ${lookupResults.length - okN}。`);
   })();
 });
 

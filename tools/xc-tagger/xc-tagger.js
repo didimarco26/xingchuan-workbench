@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v4.1.1
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v4.2.0
+ * v4.2.0 断点续跑：打标进度本地落盘（.xc-checkpoints/，每批次一个 JSON，
+ *   含名单+已完成结果），关工具/关机后重新打开工作台自动检测未完成批次、
+ *   从断点继续跑剩余达人，不用重头再来；每完成一位即原子写断点，续跑前
+ *   自动把本地已有结果与云端批次记录对齐。
  * v4.1.1 抖音号匹配修复：抖音号搜索改走服务商广场专用接口
  *   /gw/api/gsearch/basic_search_authors（seach_type=101，完整信封
  *   scene_param + search_param + page_param + sort_param）。v4.0.0 误用
@@ -105,6 +109,13 @@ const HOST = '127.0.0.1';
 // 登录态文件：保存星图 Cookie（Playwright 格式 JSON 数组）。无头 Chromium 启动时加载，
 // 检测到已登录会话时自动回写刷新。含登录凭证，严禁提交 / 外传（已在 .gitignore 忽略）。
 const COOKIES_FILE = path.resolve(__dirname, '.xc-cookies.json');
+// v4.2.0：工具版本统一常量（/health、启动 banner、断点文件共用）
+const TOOL_VERSION = '4.2.0';
+// v4.2.0 断点续跑：每个批次一个 JSON 断点（含名单+已完成结果），关工具/关机后重开自动继续。
+// 仅本机使用，不对外；含服务商自己的达人数据，已在 .gitignore 忽略。
+// 放在独立子目录 tagger/：与 xc-id-lookup 的断点（.xc-checkpoints/ 根目录、按名单指纹命名）
+// 物理隔离，两边的扫描/清理互不干扰。
+const CHECKPOINT_DIR = path.resolve(__dirname, '.xc-checkpoints', 'tagger');
 // 巨量星图 · 达人广场（广告主侧）。抓取接口与该页同源(www.xingtu.cn)，注入 Cookie 后天然带登录态。
 const XINGTU_ORIGIN = 'https://www.xingtu.cn';
 // v3.6.2：服务商端控制台首页 = 登录引导页/登录态判定页。
@@ -2215,6 +2226,78 @@ function parseListBuffer(buf, filename) {
   return { items, headers };
 }
 
+// ---- v4.2.0 断点续跑：本地批次断点（名单 + 已完成结果 + 进度） --------------
+/** 批次 ID → 安全文件名（只保留字母数字下划线短横线） */
+function checkpointSafeName(batchId) {
+  return String(batchId || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80) || 'batch';
+}
+function checkpointPath(batchId) {
+  return path.join(CHECKPOINT_DIR, checkpointSafeName(batchId) + '.json');
+}
+/** 新建断点对象（/tag 非续跑开始时调用） */
+function buildCheckpoint({ batchId, fileName, items, startedAt } = {}) {
+  const list = Array.isArray(items) ? items : [];
+  return {
+    version: TOOL_VERSION,
+    batchId: String(batchId || ''),
+    fileName: String(fileName || ''),
+    total: list.length,
+    items: list,
+    done: 0,
+    results: [],
+    status: 'running', // running | finished
+    startedAt: startedAt || Date.now(),
+    updatedAt: Date.now(),
+  };
+}
+/** 续跑时取剩余未处理的名单（done 之后的部分；做边界保护） */
+function resumeRemaining(cp) {
+  if (!cp || !Array.isArray(cp.items)) return [];
+  const done = Math.max(0, Math.min(cp.done || 0, cp.items.length));
+  return cp.items.slice(done);
+}
+async function readCheckpoint(batchId) {
+  try {
+    const txt = await fs.promises.readFile(checkpointPath(batchId), 'utf8');
+    const cp = JSON.parse(txt);
+    if (cp && cp.batchId === batchId) return cp;
+  } catch (_) { /* 不存在/损坏按无断点处理 */ }
+  return null;
+}
+/** 原子写：先写 tmp 再 rename，防止中途断电写出半截 JSON */
+async function writeCheckpointAtomic(cp) {
+  await fs.promises.mkdir(CHECKPOINT_DIR, { recursive: true });
+  cp.updatedAt = Date.now();
+  const target = checkpointPath(cp.batchId);
+  const tmp = target + '.tmp';
+  await fs.promises.writeFile(tmp, JSON.stringify(cp));
+  await fs.promises.rename(tmp, target);
+}
+/** 持久化失败不阻断打标（云端还有一份逐条 upsert 的结果） */
+async function persistCheckpoint(cp) {
+  try { await writeCheckpointAtomic(cp); }
+  catch (e) { console.warn('⚠️  断点写入失败（不影响打标）：' + friendlyErr(e)); }
+}
+/** 列出全部断点（按 updatedAt 新→旧）；损坏文件跳过 */
+async function listCheckpoints() {
+  let files = [];
+  try { files = await fs.promises.readdir(CHECKPOINT_DIR); } catch (_) { return []; }
+  const cps = [];
+  for (const f of files) {
+    if (!f.endsWith('.json')) continue;
+    try {
+      const cp = JSON.parse(await fs.promises.readFile(path.join(CHECKPOINT_DIR, f), 'utf8'));
+      if (cp && cp.batchId) cps.push(cp);
+    } catch (_) { /* 跳过损坏文件 */ }
+  }
+  cps.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  return cps;
+}
+async function discardCheckpoint(batchId) {
+  if (!batchId) return;
+  try { await fs.promises.unlink(checkpointPath(batchId)); } catch (_) { /* 忽略不存在 */ }
+}
+
 // ---- HTTP 服务 ------------------------------------------------------------
 function startServer() {
   const app = express();
@@ -2261,7 +2344,7 @@ function startServer() {
     if (loggedIn) _loggedIn = true;
     const cookieCount = readCookieFile().filter(c => /xingtu/i.test(c.domain || '')).length;
     res.json({
-      ok: true, loggedIn, version: '4.1.1', port: PORT,
+      ok: true, loggedIn, version: TOOL_VERSION, port: PORT,
       loginUrl: SUP_URL,
       marketUrl: PROVIDER_MARKET_URL,
       vision: true,
@@ -2343,6 +2426,33 @@ function startServer() {
   });
 
   // 打标：POST /tag  body={items:[{id?,name?}]}
+  // v4.2.0 断点续跑：查询本机未完成批次（网页打开工作台时自动检测）
+  app.get('/resume/state', async (req, res) => {
+    try {
+      const all = await listCheckpoints();
+      const batches = all
+        .filter(cp => cp.status === 'running' && (cp.done || 0) < (cp.total || 0))
+        .map(cp => ({
+          batchId: cp.batchId, fileName: cp.fileName, total: cp.total, done: cp.done,
+          status: cp.status, startedAt: cp.startedAt, updatedAt: cp.updatedAt, items: cp.items,
+          results: cp.results, // 续跑前用于与云端批次记录对齐（服务端去重合并）
+        }));
+      res.json({ ok: true, version: TOOL_VERSION, batches });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: friendlyErr(e) });
+    }
+  });
+
+  // v4.2.0：放弃本地断点（云端历史记录不受影响）
+  app.post('/resume/discard', async (req, res) => {
+    try {
+      await discardCheckpoint(req.body && req.body.batchId);
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: friendlyErr(e) });
+    }
+  });
+
   app.post('/tag', async (req, res) => {
     try {
       let items = (req.body && req.body.items) || [];
@@ -2391,7 +2501,29 @@ function startServer() {
       const debugVideo = process.env.XC_TAGGER_DEBUG === '1';
       if (debugVideo) console.log('🐞 XC_TAGGER_DEBUG=1：达人主页抓取将落截图、接口 JSON 与 DOM 状态到 .xc-debug/');
       // v3.8.1：打标实时进度（前端轮询 /progress）；v3.9.0：results 增量供逐条实时上云
-      tagProgress = { running: true, total: items.length, done: 0, current: '', phase: '准备', startedAt: Date.now(), results: [] };
+      // v4.2.0 断点续跑：resume=true 且带 batchId 时从本地断点恢复，只跑剩余达人；
+      // 否则新建批次断点（开跑前先落盘，第一位尚未完成就关机也不丢批次）。
+      const wantResume = !!(req.body && req.body.resume);
+      const reqBatchId = String((req.body && req.body.batchId) || '');
+      let cp;
+      let baseDone = 0;
+      if (wantResume) {
+        cp = reqBatchId ? await readCheckpoint(reqBatchId) : null;
+        if (!cp || cp.status !== 'running') {
+          return res.status(404).json({ ok: false, error: '未找到可续跑的本地断点（可能已完成或被清理），请重新上传名单' });
+        }
+        baseDone = cp.done;
+        items = resumeRemaining(cp); // 以断点内名单为准
+        tagProgress = { running: true, total: cp.total, done: baseDone, current: '', phase: '继续上次任务，准备中', startedAt: Date.now(), results: [] };
+      } else {
+        cp = buildCheckpoint({
+          batchId: reqBatchId || ('local_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8)),
+          fileName: (req.body && req.body.fileName) || '',
+          items,
+        });
+        await persistCheckpoint(cp);
+        tagProgress = { running: true, total: items.length, done: 0, current: '', phase: '准备', startedAt: Date.now(), results: [] };
+      }
       // v3.6 主链路：① 有 ID 直接进达人主页抓资料+视频；
       //             ② 主页打不开（ID 无效/未入驻/重定向）才用昵称搜达人广场兜底；
       //             ③ 两条路都失败才报「未检索到」。
@@ -2409,8 +2541,8 @@ function startServer() {
       };
       for (let _pi = 0; _pi < items.length; _pi++) {
         const it = items[_pi];
-        tagProgress.done = _pi;
-        tagProgress.current = it.name || it.id || it.douyin || `第${_pi + 1}位`;
+        tagProgress.done = baseDone + _pi;
+        tagProgress.current = it.name || it.id || it.douyin || `第${baseDone + _pi + 1}位`;
         tagProgress.phase = '抓取达人主页与视频画面（视频抽帧较慢，请耐心等待）';
         let auth = null;
         let videoAnalysis = [];
@@ -2479,7 +2611,11 @@ function startServer() {
             dataSource: 'new', videoBonus: 0, videoAnalysis: [],
           });
           tagProgress.results.push(results[results.length - 1]); // v3.9.0 每完成一位立即可供增量上云
-          tagProgress.done = _pi + 1;
+          tagProgress.done = baseDone + _pi + 1;
+          // v4.2.0：每完成一位写入本地断点
+          cp.results.push(results[results.length - 1]);
+          cp.done = baseDone + _pi + 1;
+          await persistCheckpoint(cp);
           continue;
         }
         // v3.5：双库口径（名单「来源」列：存量=stock/增量=increment；缺省按新达人 new）
@@ -2549,14 +2685,26 @@ function startServer() {
           via,
         });
         tagProgress.results.push(results[results.length - 1]); // v3.9.0 每完成一位立即可供增量上云
-        tagProgress.done = _pi + 1;
+        tagProgress.done = baseDone + _pi + 1;
+        // v4.2.0：每完成一位写入本地断点
+        cp.results.push(results[results.length - 1]);
+        cp.done = baseDone + _pi + 1;
+        await persistCheckpoint(cp);
       }
-      // 按分降序
-      results.sort((a, b) => b.score - a.score);
+      // 按分降序（以断点内全量结果为准；非续跑时与 results 相同）
+      const finalResults = cp.results;
+      finalResults.sort((a, b) => b.score - a.score);
       const summary = { 标杆: 0, 主力: 0, 潜力: 0, 储备: 0 };
-      results.forEach(r => { summary[r.tier] = (summary[r.tier] || 0) + 1; });
+      finalResults.forEach(r => { summary[r.tier] = (summary[r.tier] || 0) + 1; });
+      // v4.2.0：批次完成，断点标记 finished
+      cp.status = 'finished';
+      cp.done = finalResults.length;
+      cp.finishedAt = Date.now();
+      await persistCheckpoint(cp);
       tagProgress.running = false;
-      res.json({ ok: true, loggedIn: true, total: results.length, summary, results });
+      tagProgress.done = cp.total;
+      tagProgress.phase = '已完成';
+      res.json({ ok: true, loggedIn: true, total: finalResults.length, summary, results: finalResults, batchId: cp.batchId });
     } catch (e) {
       tagProgress.running = false;
       res.status(500).json({ ok: false, error: '打标失败：' + friendlyErr(e) });
@@ -2565,7 +2713,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v4.1.1（零安装Node自动就绪·抖音号专用检索修复·逐条实时上云·视频画面AI打标）');
+    console.log('  星川服务商达人自助打标 · 本地工具已启动 v4.2.0（断点续跑·关机重开自动继续·零安装Node·逐条实时上云·视频画面AI打标）');
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
@@ -2659,6 +2807,16 @@ module.exports = {
   searchByDouyin,
   parseListBuffer,
   cleanHandle,
+  // v4.2.0 断点续跑
+  TOOL_VERSION,
+  checkpointSafeName,
+  checkpointPath,
+  buildCheckpoint,
+  resumeRemaining,
+  readCheckpoint,
+  writeCheckpointAtomic,
+  listCheckpoints,
+  discardCheckpoint,
 };
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
