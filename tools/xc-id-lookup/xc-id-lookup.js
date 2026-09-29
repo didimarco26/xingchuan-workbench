@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人信息互查 · 本地一键工具 (xc-id-lookup) v1.2.0
+ * 星川服务商达人信息互查 · 本地一键工具 (xc-id-lookup) v1.2.2
+ * v1.2.2 修复星图 ID 大整数精度溢出：星图接口返回的 author_id/star_id 等为 19 位
+ *       整数，超过 Number.MAX_SAFE_INTEGER，JSON.parse 会丢精度（末几位变 0）。
+ *       现统一在解析前把 ID 类字段（字段名含 id，大小写不敏感）的 16 位以上数字
+ *       字面量加引号转字符串，覆盖 gsearch / 达人主页 XHR / 页面内嵌 JSON 三条链路。
  * v1.2.0 断点续跑：每完成一行立即落盘 .xc-checkpoints/，中断重开按名单指纹识别，
  *       可继续未完成行或放弃断点重新开始，已完成行不重复请求。
  * ------------------------------------------------------------------
@@ -38,7 +42,7 @@ const XLSX = require('xlsx');
 const fs = require('fs');
 
 // ---- 配置 ----------------------------------------------------------------
-const VERSION = '1.2.1';
+const VERSION = '1.2.2';
 const PORT = 7843;
 const HOST = '127.0.0.1';
 // 登录态文件与独立配置目录（与 xc-tagger 各自独立，可共存于同一台电脑）
@@ -437,6 +441,26 @@ function keepDigits(v) {
   return m ? m[0] : '';
 }
 
+// ---- 大整数 ID 精度保护（防 JSON.parse 丢精度）-----------------------------
+// 星图接口返回的 author_id / star_id / user_id 等是 19 位整数，超过
+// Number.MAX_SAFE_INTEGER（9007199254740991，16 位），直接 JSON.parse 会把末
+// 几位抹成 0。解析前先把【字段名含 id（大小写不敏感）】且值为 16 位以上整数的
+// 数字字面量加引号转字符串：对象标量与 ID 数组两种形态都处理。
+const BIG_ID_SCALAR_RE = /"([A-Za-z0-9_]*[Ii][Dd][A-Za-z0-9_]*)"(\s*:\s*)(-?\d{16,})(?=\s*[,}\]])/g;
+const BIG_ID_ARRAY_RE = /("[A-Za-z0-9_]*[Ii][Dd][A-Za-z0-9_]*"\s*:\s*\[)([\s\S]*?)(\])/g;
+// 数组体内只给「独立数字 token」加引号（首元素或前后须为空白/逗号/方括号），避免误伤字符串
+const BIG_ID_ARRAY_ITEM_RE = /(?<=[\s,\[]|^)(-?\d{16,})(?=\s*[,\]]|\s*$)/g;
+
+function protectBigIds(rawText) {
+  if (typeof rawText !== 'string') return rawText;
+  return rawText
+    .replace(BIG_ID_SCALAR_RE, '"$1"$2"$3"')
+    .replace(BIG_ID_ARRAY_RE, (m, head, body, tail) => head + body.replace(BIG_ID_ARRAY_ITEM_RE, '"$1"') + tail);
+}
+function safeJsonParse(rawText) {
+  return JSON.parse(protectBigIds(rawText));
+}
+
 // ---- Cookie 备份 / 恢复 ----------------------------------------------------
 function readCookieFile() {
   try {
@@ -647,7 +671,13 @@ async function xgFetch(page, api, body, method = 'POST') {
       });
       const text = await resp.text();
       let json = null;
-      try { json = JSON.parse(text); } catch (_) { json = null; }
+      // 大整数 ID 防精度丢失：解析前给 ID 类字段（字段名含 id）16 位以上整数加引号。
+      // 此函数在页面上下文内执行，无法引用 Node 侧 protectBigIds，逻辑须保持一致。
+      const protectBigIds = (s) => s
+        .replace(/"([A-Za-z0-9_]*[Ii][Dd][A-Za-z0-9_]*)"(\s*:\s*)(-?\d{16,})(?=\s*[,}\]])/g, '"$1"$2"$3"')
+        .replace(/("[A-Za-z0-9_]*[Ii][Dd][A-Za-z0-9_]*"\s*:\s*\[)([\s\S]*?)(\])/g,
+          (m, h, b, t) => h + b.replace(/(?<=[\s,\[]|^)(-?\d{16,})(?=\s*[,\]]|\s*$)/g, '"$1"') + t);
+      try { json = JSON.parse(protectBigIds(text)); } catch (_) { json = null; }
       return { ok: resp.ok, status: resp.status, json, text: text.slice(0, 500) };
     } catch (e) {
       return { ok: false, status: 0, json: null, text: String(e).slice(0, 300) };
@@ -865,7 +895,7 @@ function tryParse(s) {
   if (!s || typeof s !== 'string') return null;
   const t = s.trim();
   if (!t || (t[0] !== '{' && t[0] !== '[')) return null;
-  try { return JSON.parse(t); } catch (_) { return null; }
+  try { return safeJsonParse(t); } catch (_) { return null; }
 }
 function afterFirstBrace(s) {
   const i = s.indexOf('{');
@@ -891,7 +921,7 @@ function tryBalancedParse(text, start) {
       if (depth === 0) {
         const slice = text.slice(start, i + 1);
         if (slice.length < 20) return null;
-        try { return JSON.parse(slice); } catch (_) { return null; }
+        try { return safeJsonParse(slice); } catch (_) { return null; }
       }
     }
   }
@@ -922,8 +952,11 @@ async function fetchByStarId(page, starId) {
       if (!/xingtu\.cn/.test(u)) return;
       const rt = resp.request().resourceType();
       if (rt !== 'xhr' && rt !== 'fetch') return;
-      const j = await resp.json().catch(() => null);
-      if (j) xhrObjs.push(j);
+      // 取文本后走安全解析：Playwright 的 resp.json() 内部同样用 JSON.parse，
+      // 19 位 author_id 会丢精度。
+      const raw = await resp.text().catch(() => '');
+      if (!raw) return;
+      try { xhrObjs.push(safeJsonParse(raw)); } catch (_) { /* 非 JSON 响应忽略 */ }
     } catch (_) { /* 单个响应异常忽略 */ }
   });
 
@@ -1425,6 +1458,8 @@ module.exports = {
   cleanHandle,
   nameEqual,
   keepDigits,
+  protectBigIds,
+  safeJsonParse,
   mapGsearchRow,
   pickSearchResult,
   findIdentityCandidates,
