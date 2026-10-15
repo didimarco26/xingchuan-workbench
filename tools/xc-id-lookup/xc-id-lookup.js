@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人信息互查 · 本地一键工具 (xc-id-lookup) v1.2.2
+ * 星川服务商达人信息互查 · 本地一键工具 (xc-id-lookup) v1.3.0
+ * v1.3.0 修复名称兜底检索抖音号全空：①名称搜索 seach_type 由 0 改为 102（昵称，
+ *       真机抓包枚举 100=星图ID/101=抖音号/102=昵称/103=内容），scene 信封同步
+ *       为服务商广场真机口径；②搜索精简行缺 unique_id 时，自动用命中的星图ID
+ *       回达人主页补全抖音号；③mapGsearchRow 兼容 attribute_datas 的 KV 数组
+ *       形态与 unique_id 多种字段别名。本版断点数据版本升级（#data-v2），
+ *       v1.2.x 含空抖音号的已完成断点不会被续跑复用，需重新互查一次。
  * v1.2.2 修复星图 ID 大整数精度溢出：星图接口返回的 author_id/star_id 等为 19 位
  *       整数，超过 Number.MAX_SAFE_INTEGER，JSON.parse 会丢精度（末几位变 0）。
  *       现统一在解析前把 ID 类字段（字段名含 id，大小写不敏感）的 16 位以上数字
@@ -18,8 +24,9 @@
  * 三路检索优先级（命中即止）：
  *   ① 星图ID → 直接进达人主页 /xingtu/author/{id}/，取 unique_id（抖音号）与昵称；
  *   ② 抖音号 → POST /gw/api/gsearch/basic_search_authors，seach_type=101 精确检索；
- *   ③ 达人名称 → POST /gw/api/gsearch/basic_search_authors，seach_type=0 模糊检索，取第一条。
+ *   ③ 达人名称 → POST /gw/api/gsearch/basic_search_authors，seach_type=102 昵称检索，取第一条。
  * 模糊结果过滤：有名称时第一条结果的名称须与给定名称一致才采用；无名称时信任排序取第一条。
+ * 搜索行缺抖音号（精简资料）时，自动用命中星图ID回达人主页补全 unique_id。
  *
  * 浏览器架构（与 xc-tagger 一致）：
  *   1) 在 127.0.0.1:7843 起本地 HTTP 服务（只监听本机，不对外），自带网页界面；
@@ -42,7 +49,7 @@ const XLSX = require('xlsx');
 const fs = require('fs');
 
 // ---- 配置 ----------------------------------------------------------------
-const VERSION = '1.2.2';
+const VERSION = '1.3.0';
 const PORT = 7843;
 const HOST = '127.0.0.1';
 // 登录态文件与独立配置目录（与 xc-tagger 各自独立，可共存于同一台电脑）
@@ -54,6 +61,10 @@ const DEBUG_DIR = path.resolve(__dirname, '.xc-id-debug');
 // 断点续跑：每条完成立即落盘的检查点目录
 const ck = require('./xc-checkpoint');
 const CHECKPOINT_DIR = path.resolve(__dirname, '.xc-checkpoints');
+// 断点数据版本：v1.3.0 起名称搜索结果字段口径变化，旧版（#data-v1，无后缀）
+// 已完成断点里的空抖音号不能被续跑复用，故工具标签升级为 #data-v2，
+// 旧断点不会被识别（稍后随 prune 自动清理）。
+const CK_TOOL = 'xc-id-lookup#data-v2';
 
 const XINGTU_ORIGIN = 'https://www.xingtu.cn';
 // 服务商端控制台首页 = 登录引导/判定页（服务商账号必须从 /sup/ 端建立会话）
@@ -685,31 +696,69 @@ async function xgFetch(page, api, body, method = 'POST') {
   }, { origin: XINGTU_ORIGIN, api, body, method });
 }
 
-// basic_search_authors 的场景信封（与 xc-tagger v4.1.1 相同；广场搜索必需）
+// basic_search_authors 的场景信封（服务商广场真机抓包口径，与 xc-tagger v4.2.0 一致）
 const GSEARCH_SCENE = {
-  scene_id: 4,
-  scene_name: 'service_market',
-  scene_identity: 4,
-  page_identity: 3,
+  platform_source: 1,
+  search_scene: 1,
+  display_scene: 1,
+  marketing_target: 1,
+  task_category: 1,
+  first_industry_id: 0,
+  task_status: 3,
 };
+// 搜索类型真机枚举：100=星图ID、101=抖音号、102=昵称、103=内容
+const SEACH_TYPE = { ID: 100, DOUYIN: 101, NAME: 102, CONTENT: 103 };
 
 /**
  * 把 basic_search_authors 单行结果映射为身份三元组（纯函数）。
- * 结构：{star_id, attribute_datas:{nick_name/author_nick_name, unique_id/author_unique_id, short_id}}
+ * 标准结构：{star_id, attribute_datas:{nick_name/author_nick_name, unique_id/author_unique_id, short_id}}
+ * 真机上 attribute_datas 还出现过 KV 数组形态（[{field_name/key/name, field_value/value}]），
+ * 不同 seach_type 下行内字段也可能落在顶层，这里统一展平后按键名别名提取。
  */
+// KV 数组形态的 attribute_datas 展平为对象
+function flattenAttrDatas(d) {
+  if (!d || typeof d !== 'object') return {};
+  if (!Array.isArray(d)) return d;
+  const out = {};
+  for (const it of d) {
+    if (!it || typeof it !== 'object') continue;
+    const k = it.field_name ?? it.field_key ?? it.key ?? it.name ?? it.label ?? it.attr_key;
+    const v = it.field_value ?? it.value ?? it.val ?? it.text ?? it.attr_value;
+    if (k != null && v != null && out[String(k)] == null) out[String(k)] = v;
+  }
+  return out;
+}
+const G_NAME_KEY_RE = /^(nick_?name|author_nick_?name|nickname|nick|author_?name|name)$/i;
+const G_HANDLE_KEY_RE = /^(unique_?id|author_unique_?id|douyin_unique_?id|douyin_?id|douyin_?account|douyin_?no|aweme_unique_?id|account_?name|account)$/i;
+const G_SHORT_ID_KEY_RE = /^short_?id$/i;
+// 在对象里按键名正则取第一个非空标量
+function pickField(obj, re) {
+  if (!obj || typeof obj !== 'object') return '';
+  for (const k of Object.keys(obj)) {
+    if (!re.test(k)) continue;
+    const v = obj[k];
+    if (v == null || typeof v === 'object') continue;
+    const s = String(v).trim();
+    if (s) return s;
+  }
+  return '';
+}
+
 function mapGsearchRow(row) {
   if (!row || typeof row !== 'object') return null;
-  const d = (row.attribute_datas && typeof row.attribute_datas === 'object') ? row.attribute_datas : {};
+  const d = flattenAttrDatas(row.attribute_datas);
   const id = normText(row.star_id ?? row.star_author_id ?? row.author_id ?? row.id);
-  const name = normText(d.nick_name ?? d.author_nick_name ?? row.nick_name ?? row.nickname);
-  let douyin = normText(d.unique_id ?? d.author_unique_id ?? row.unique_id);
-  if (!douyin) douyin = normText(d.short_id ?? row.short_id);
+  // 昵称 / 抖音号：attribute_datas 内优先，行顶层兜底；short_id 为旧版纯数字抖音号
+  const name = normText(pickField(d, G_NAME_KEY_RE) || pickField(row, G_NAME_KEY_RE));
+  let douyin = normText(pickField(d, G_HANDLE_KEY_RE) || pickField(row, G_HANDLE_KEY_RE));
+  if (!douyin) douyin = normText(pickField(d, G_SHORT_ID_KEY_RE) || pickField(row, G_SHORT_ID_KEY_RE));
   if (!id || (!name && !douyin)) return null;
   return { id, name, douyin };
 }
 
 /**
- * 服务商广场搜索 basic_search_authors（seach_type：101=抖音号 / 0=名称）。
+ * 服务商广场搜索 basic_search_authors（seach_type：100=星图ID / 101=抖音号 /
+ * 102=昵称 / 103=内容）。
  * 完整信封：scene_param + search_param + page_param + sort_param；逐条调用。
  */
 async function basicSearchAuthors(page, keyword, seachType, size = 20) {
@@ -769,13 +818,13 @@ function pickSearchResult(mapped, opt = {}) {
 
 // ② 抖音号检索（seach_type=101）
 async function searchByDouyin(page, douyin, nameHint) {
-  const mapped = await basicSearchAuthors(page, douyin, 101);
+  const mapped = await basicSearchAuthors(page, douyin, SEACH_TYPE.DOUYIN);
   return pickSearchResult(mapped, { wantDouyin: douyin, nameHint });
 }
 
-// ③ 达人名称检索（seach_type=0，昵称模糊搜索，取第一条 + 名称一致性过滤）
+// ③ 达人名称检索（seach_type=102 昵称搜索，取第一条 + 名称一致性过滤）
 async function searchByName(page, name) {
-  const mapped = await basicSearchAuthors(page, name, 0);
+  const mapped = await basicSearchAuthors(page, name, SEACH_TYPE.NAME);
   return pickSearchResult(mapped, { nameHint: name });
 }
 
@@ -1131,6 +1180,28 @@ const DEFAULT_FETCHERS = {
 };
 
 /**
+ * gsearch 命中行只有精简资料（缺 unique_id，名称搜索最常见）时，
+ * 用命中的星图ID直达达人主页补全抖音号；与 ① 共用 caches.id，同一 ID 不重复请求。
+ */
+async function enrichFromHome(page, hit, caches, F) {
+  if (!hit || !hit.id || hit.douyin) return hit;
+  const hid = keepDigits(hit.id) || cleanHandle(hit.id);
+  if (!hid || hid === '0') return hit;
+  if (!caches.id.has(hid)) {
+    let h = null;
+    try { h = await F.byId(hid, page); } catch (_) { h = null; }
+    caches.id.set(hid, h);
+    await sleep(650 + Math.floor(Math.random() * 350));
+  }
+  const h = caches.id.get(hid);
+  if (h) {
+    if (!hit.douyin && h.douyin) hit.douyin = h.douyin;
+    if (!hit.name && h.name) hit.name = h.name;
+  }
+  return hit;
+}
+
+/**
  * 单行三路互查（星图ID > 抖音号 > 名称），带缓存避免重复输入重复请求。
  * @param {Map} caches {id:Map, dy:Map, nm:Map}
  */
@@ -1167,11 +1238,13 @@ async function resolveItem(page, it, caches, deps) {
     }
     const r = caches.dy.get(key);
     if (r && r.id) {
+      // 搜索行为精简资料（无 unique_id）时回主页补全
+      await enrichFromHome(page, r, caches, F);
       return resultOk(it, { id: r.id, douyin: r.douyin || inDy, name: r.name }, r.via || 'douyin_exact');
     }
   }
 
-  // ③ 名称兜底检索（seach_type=0）
+  // ③ 名称兜底检索（seach_type=102 昵称搜索）
   if (inNm) {
     const key = inNm.toLowerCase();
     if (!caches.nm.has(key)) {
@@ -1182,6 +1255,8 @@ async function resolveItem(page, it, caches, deps) {
     }
     const r = caches.nm.get(key);
     if (r && r.id) {
+      // 名称搜索行常只有 star_id+昵称：用命中星图ID回主页补抖音号
+      await enrichFromHome(page, r, caches, F);
       return resultOk(it, { id: r.id, douyin: r.douyin, name: r.name || inNm }, 'name_search');
     }
   }
@@ -1308,7 +1383,7 @@ app.post('/checkpoint/peek', (req, res) => {
   const items = Array.isArray(req.body && req.body.items) ? req.body.items : [];
   if (!items.length) return res.json({ found: false });
   const source = String((req.body && req.body.source) || 'file');
-  const jid = ck.computeJobId('xc-id-lookup', source, items);
+  const jid = ck.computeJobId(CK_TOOL, source, items);
   res.json(ck.peek(CHECKPOINT_DIR, jid) || { found: false });
 });
 
@@ -1316,7 +1391,7 @@ app.post('/checkpoint/peek', (req, res) => {
 app.post('/checkpoint/discard', (req, res) => {
   const items = Array.isArray(req.body && req.body.items) ? req.body.items : [];
   const source = String((req.body && req.body.source) || 'file');
-  if (items.length) ck.discard(CHECKPOINT_DIR, ck.computeJobId('xc-id-lookup', source, items));
+  if (items.length) ck.discard(CHECKPOINT_DIR, ck.computeJobId(CK_TOOL, source, items));
   res.json({ ok: true });
 });
 
@@ -1330,7 +1405,7 @@ app.post('/lookup', async (req, res) => {
   const source = String((req.body && req.body.source) || 'file');
   const meta = (req.body && req.body.meta) || {};
   const wantResume = !!(req.body && req.body.resume);
-  const jid = ck.computeJobId('xc-id-lookup', source, items);
+  const jid = ck.computeJobId(CK_TOOL, source, items);
 
   let cp = wantResume ? ck.load(CHECKPOINT_DIR, jid) : null;
   if (!wantResume) ck.discard(CHECKPOINT_DIR, jid);
@@ -1469,4 +1544,9 @@ module.exports = {
   classifyHeaders,
   buildExportRows,
   resolveItem,
+  basicSearchAuthors,
+  flattenAttrDatas,
+  enrichFromHome,
+  GSEARCH_SCENE,
+  SEACH_TYPE,
 };
