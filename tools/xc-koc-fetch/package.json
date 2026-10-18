@@ -1,0 +1,18 @@
+{
+  "name": "xc-koc-fetch",
+  "version": "1.0.0",
+  "private": true,
+  "description": "星川 KOC 契合度论证 · 抖音主页作品本地抓取助手 v1.0.0：本机真实 Chrome 以移动端 share 页打开达人主页，截获作品列表 XHR，为五轴评分提供近期视频内容样本；只采集公开内容，不登录不绕控；127.0.0.1:7844；Mac 零安装 Node。",
+  "main": "xc-koc-fetch.js",
+  "bin": {
+    "xc-koc-fetch": "xc-koc-fetch.js"
+  },
+  "scripts": {
+    "start": "node xc-koc-fetch.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "playwright": "1.49.1"
+  }
+}
