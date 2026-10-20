@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 /* eslint-disable */
 /**
- * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v4.2.0
+ * 星川服务商达人自助打标 · 本地一键工具 (xc-tagger) v4.2.1
+ * v4.2.1 登录页反复刷新修复：等待手动登录期间【绝不强制导航/刷新用户可见标签页】。
+ *   旧版启动预检会 converge（goto /sup/→/provider/）把刚打开的 SSO 登录页重定向
+ *   两次，等待登录时每 8 秒还会对「落地页」强制收敛导航——用户正在输入账号密码的
+ *   页面被反复跳走，根本没机会登录。现改为：①启动预检只做零副作用 URL 扫描；
+ *   ②点「登录星图」后，复用的已有标签一次都不导航，仅工具新开的空白页导一次登录入口；
+ *   ③等待期间登录态探测放到【后台探针标签页】（不可见、不抢焦点），用户标签完全静止；
+ *   登录成功判定仍为纯 URL 轮询（/sup/、/provider/）。
  * v4.2.0 断点续跑：打标进度本地落盘（.xc-checkpoints/，每批次一个 JSON，
  *   含名单+已完成结果），关工具/关机后重新打开工作台自动检测未完成批次、
  *   从断点继续跑剩余达人，不用重头再来；每完成一位即原子写断点，续跑前
@@ -110,7 +117,7 @@ const HOST = '127.0.0.1';
 // 检测到已登录会话时自动回写刷新。含登录凭证，严禁提交 / 外传（已在 .gitignore 忽略）。
 const COOKIES_FILE = path.resolve(__dirname, '.xc-cookies.json');
 // v4.2.0：工具版本统一常量（/health、启动 banner、断点文件共用）
-const TOOL_VERSION = '4.2.0';
+const TOOL_VERSION = '4.2.1';
 // v4.2.0 断点续跑：每个批次一个 JSON 断点（含名单+已完成结果），关工具/关机后重开自动继续。
 // 仅本机使用，不对外；含服务商自己的达人数据，已在 .gitignore 忽略。
 // 放在独立子目录 tagger/：与 xc-id-lookup 的断点（.xc-checkpoints/ 根目录、按名单指纹命名）
@@ -813,37 +820,86 @@ async function runLogin(signal) {
 
   // 取登录驱动页：优先复用已停在 SSO/星图页的标签（用户可见、且与启动时打开的是同一个），没有才新开
   let page = sess._workPage;
+  let pageCreated = false;
   if (!page || page.isClosed()) page = findReusablePage(sess.context);
   if (!page) {
     page = await sess.context.newPage().catch(() => null);
     if (!page) return { ok: false, loggedIn: false, message: '无法打开浏览器标签页，请重试。', mode: sess.mode };
+    pageCreated = true;
     try { await page.setViewportSize({ width: 1360, height: 950 }); } catch (_) {}
   }
   sess._workPage = page;
 
-  // 未登录：导航到服务商端 /sup/ 控制台（未登录会自动跳到 SSO，登录后回跳 /sup/）
   if (sess.mode === 'cdp') {
+    // ★ v4.2.1：只有【工具自己新开的空白标签】才导一次登录入口；复用的已有标签（用户正在
+    // 看的 SSO/星图页）一次都不导航、不刷新，让页面完全静止等用户手动输入账号密码。
     try {
-      const u = (() => { try { return page.url(); } catch (_) { return ''; } })();
-      if (!/sso\.oceanengine\.com|\/sup(?:\/|$)/.test(u)) await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      if (pageCreated) {
+        const u = (() => { try { return page.url() || ''; } catch (_) { return ''; } })();
+        if (!/xingtu\.cn|sso\.oceanengine\.com|passport|oauth|login/i.test(u)) {
+          await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        }
+      }
       await page.bringToFront();
     } catch (_) { /* 导航失败也让用户在可见窗口里手动操作 */ }
-    console.log('🟢 请在已打开的 ' + sess.browserName + ' 窗口中登录巨量星图（可抖音扫码或账号密码/手机验证码登录）…');
+    console.log('🟢 请在已打开的 ' + sess.browserName + ' 窗口中登录巨量星图（可抖音扫码或账号密码/手机验证码登录）；登录页会保持静止不刷新，可安心输入…');
   } else {
     console.log('🟢 无头模式：正在打开抖音扫码登录，请在工作台网页用手机抖音 App 扫码…');
     _qr = { status: 'starting', qrDataUrl: null, updatedAt: Date.now() };
     await gotoDouyinQr(page);
   }
 
+  // ★ v4.2.1：CDP 等待期间的登录态探测全部放在【后台探针标签页】里完成，
+  // 绝不 goto/reload 用户正在输入的可见标签。探针页不 bringToFront，用户无感。
+  // 背景：旧版每 8s 对「落地页」执行 convergeLoggedInPage（goto /sup/、/provider/），
+  // 未登录 /sup/ 会被踢回 SSO/营销首页，用户正在输入的页面每 8 秒被强制跳走一次。
+  let probePage = null;
+  if (sess.mode === 'cdp') {
+    try {
+      probePage = await sess.context.newPage().catch(() => null);
+      if (probePage) { try { await probePage.setViewportSize({ width: 1100, height: 800 }); } catch (_) {} }
+    } catch (_) { probePage = null; }
+  }
+  const closeProbe = async () => {
+    if (probePage) {
+      try { if (!probePage.isClosed()) await probePage.close(); } catch (_) {}
+      probePage = null;
+    }
+  };
+  // 在后台探针页走一次 /sup/ → /provider/ 收敛（与旧 converge 同判定口径），
+  // 返回探针是否已进入服务商端登录区；导航只发生在探针页，不触碰用户可见标签。
+  const probeLogin = async () => {
+    if (!probePage) return false;
+    try {
+      await probePage.goto(SUP_URL, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+      await probePage.waitForTimeout(1500).catch(() => {});
+      let u = ''; try { u = probePage.url() || ''; } catch (_) {}
+      if (!isLoggedInUrl(u)) {
+        await probePage.goto(PROVIDER_MARKET_URL, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+        await probePage.waitForTimeout(1500).catch(() => {});
+      }
+      try { u = probePage.url() || ''; } catch (_) { u = ''; }
+      return isLoggedInUrl(u);
+    } catch (_) { return false; }
+  };
+
   const deadline = Date.now() + LOGIN_WAIT_MS;
   let lastReload = Date.now();
-  let lastSquareCheck = 0;
+  // v4.2.1：进入等待前先用后台探针探测一次（覆盖点击时登录态其实已建立、
+  // 但标签停在营销首页等非 /sup/ 页的情况）；探针已登录时，下一轮 URL 全扫会识别到它。
+  let lastProbeAt = 0;
+  if (sess.mode === 'cdp' && probePage) {
+    await probeLogin();
+    lastProbeAt = Date.now();
+  }
   while (Date.now() < deadline) {
     if (signal && signal.aborted) {
       console.log('ℹ️  用户取消了登录等待。');
+      await closeProbe();
       return { ok: false, loggedIn: false, cancelled: true, mode: sess.mode, message: '已取消登录' };
     }
     if (!(await sessionAlive(sess))) {
+      await closeProbe();
       return { ok: false, loggedIn: false, message: '浏览器连接中断，请重新点「登录星图」（工具会自动重启浏览器）。', mode: sess.mode };
     }
     // 无头模式：持续刷新二维码；停留超过 100 秒未扫码则重新进抖音扫码换新码
@@ -854,40 +910,20 @@ async function runLogin(signal) {
         lastReload = Date.now();
       }
     }
-    // ① 所有上下文的所有标签页里找已登录的（纯 URL 判定）
+    // ① 所有上下文的所有标签页里找已登录的（纯 URL 判定，零导航）。
+    //    用户登录成功后 SSO 回跳 /sup/（或纯服务商账号落 /provider/）会在这里被识别。
     let loggedPage = await findLoggedInPage();
-    // ② CDP 落地页复核：某标签已到 xingtu.cn 但不在 /sup/（营销首页/角色页等），
-    //    导航该页到服务商端 /sup/ 控制台——已登录会渲染控制台（URL 留在 /sup/），未登录会被踢回 SSO。
-    //    每 8 秒最多一次，避免打断用户正在操作的登录页（SSO/护照页不导航）。
-    if (!loggedPage && sess.mode === 'cdp' && Date.now() - lastSquareCheck > 8000) {
-      lastSquareCheck = Date.now();
-      let landing = null;
-      for (const ctx of allContexts()) {
-        let pages = [];
-        try { pages = (ctx && typeof ctx.pages === 'function') ? ctx.pages() : []; } catch (_) { continue; }
-        landing = pages.find(p => {
-          try {
-            if (!p || p.isClosed()) return false;
-            const u = p.url() || '';
-            // 星图域名下、尚未进入服务商端控制台（/sup/、/provider/）、且不在 SSO/护照/登录链路 → 落地页，导航复核
-            return /xingtu\.cn/i.test(u) && !isLoggedInUrl(u) &&
-              !/sso\.oceanengine\.com|passport|redirect_uri=|\/(sso|login)(?:\/|$)/i.test(u);
-          } catch (_) { return false; }
-        }) || null;
-        if (landing) break;
-      }
-      if (landing) {
-        try {
-          await convergeLoggedInPage(landing).catch(() => {});
-          await landing.waitForTimeout(2500);
-          loggedPage = await findLoggedInPage();
-        } catch (_) { /* 下轮再试 */ }
-      }
+    // ② v4.2.1：CDP 后台探针复核，覆盖用户登录后停在营销首页等非 /sup/、/provider/
+    //    页面的情况。每 8 秒在【后台探针标签】导航探测，用户可见标签保持完全静止。
+    if (!loggedPage && sess.mode === 'cdp' && probePage && Date.now() - lastProbeAt > 8000) {
+      lastProbeAt = Date.now();
+      if (await probeLogin()) loggedPage = probePage;
     }
     if (loggedPage) {
       await finishLogin(loggedPage);
       _loggedIn = true;
       console.log('✅ 登录成功，Cookie 已备份到 .xc-cookies.json。');
+      await closeProbe();
       // v3.4：CDP 模式登录成功后自动关闭浏览器窗口（无头模式无窗口，保留供打标）
       await closeLoginBrowser();
       return {
@@ -900,6 +936,7 @@ async function runLogin(signal) {
     }
     await sleep(LOGIN_POLL_MS);
   }
+  await closeProbe();
   return {
     ok: false, loggedIn: false, mode: sess.mode,
     message: sess.mode === 'headless'
@@ -2713,7 +2750,7 @@ function startServer() {
 
   app.listen(PORT, HOST, () => {
     console.log('\n==================================================');
-    console.log('  星川服务商达人自助打标 · 本地工具已启动 v4.2.0（断点续跑·关机重开自动继续·零安装Node·逐条实时上云·视频画面AI打标）');
+    console.log(`  星川服务商达人自助打标 · 本地工具已启动 v${TOOL_VERSION}（登录页不刷新·断点续跑·关机重开自动继续·零安装Node·逐条实时上云·视频画面AI打标）`);
     console.log(`  本地服务：http://${HOST}:${PORT}`);
     console.log('  工作台网页：https://didimarco26.github.io/xingchuan-workbench/');
     console.log('--------------------------------------------------');
@@ -2726,14 +2763,31 @@ function startServer() {
     console.log('   3) 上传达人名单 Excel，点「开始打标」等待结果。');
     console.log('==================================================\n');
     // 启动后自动准备浏览器会话（CDP 模式会自动打开 Chrome/Edge 窗口）
+    // ★ v4.2.1：预检只做【零副作用的标签页 URL 扫描】，不再调 sessionWorkPage/converge。
+    // 旧版未登录时会对刚打开、正停在 SSO 登录页的标签连续 goto /sup/、/provider/，
+    // 页面被反复刷新，用户来不及输入账号密码。浏览器启动参数本身只打开一次 SUP_URL，
+    // 未登录自然停在 SSO 登录页，保持静止等用户在「登录星图」流程里手动登录即可。
     setTimeout(() => {
       acquireSession().then(async (sess) => {
-        const page = await sessionWorkPage(sess);
-        const in_ = await checkLoggedIn(page);
+        let in_ = false;
+        try {
+          const ctxs = [];
+          try { if (sess.browser && typeof sess.browser.contexts === 'function') ctxs.push(...sess.browser.contexts()); } catch (_) {}
+          if (!ctxs.includes(sess.context)) ctxs.push(sess.context);
+          outerPre: for (const ctx of ctxs) {
+            let pages = [];
+            try { pages = (ctx && typeof ctx.pages === 'function') ? ctx.pages() : []; } catch (_) { continue; }
+            for (const pg of pages) {
+              try {
+                if (pg && !pg.isClosed() && isLoggedInUrl(pg.url() || '')) { in_ = true; break outerPre; }
+              } catch (_) { /* 跳转中，忽略 */ }
+            }
+          }
+        } catch (_) { /* 扫描失败按未登录处理，不做任何导航 */ }
         if (in_) _loggedIn = true;
         console.log(in_
           ? `✅ 检测到星图登录态有效，可直接使用（浏览器：${sess.browserName}）。\n`
-          : `ℹ️  尚未登录：请到工作台点「🚀 登录星图」，在弹出的浏览器窗口里扫码或账号密码登录（当前浏览器：${sess.browserName}）。\n`);
+          : `ℹ️  尚未登录：请到工作台点「🚀 登录星图」，在弹出的浏览器窗口里扫码或账号密码登录（登录页保持静止不刷新，可安心输入；当前浏览器：${sess.browserName}）。\n`);
       }).catch(e => console.log('⚠️  浏览器自动启动失败：' + friendlyErr(e) + '\n   点「登录星图」时会自动重试。\n'));
     }, 800);
   });
